@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 10s
+
+scrape_configs:
+  # Observer running inside compose (`--profile observer`).
+  - job_name: flashmevlensr
+    static_configs:
+      - targets: ["observer:9464"]
+
+  # Observer running on the host (`make follow`); requires -listen 0.0.0.0:9464.
+  - job_name: flashmevlensr-host
+    static_configs:
+      - targets: ["host.docker.internal:9464"]

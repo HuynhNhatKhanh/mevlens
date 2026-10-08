@@ -1,0 +1,21 @@
+apiVersion: 1
+
+datasources:
+  - name: VictoriaMetrics
+    uid: victoriametrics
+    type: prometheus
+    access: proxy
+    url: http://victoriametrics:8428
+    isDefault: true
+
+  - name: ClickHouse
+    uid: clickhouse
+    type: grafana-clickhouse-datasource
+    jsonData:
+      host: clickhouse
+      port: 9000
+      protocol: native
+      username: ${CLICKHOUSE_USER}
+      defaultDatabase: mevlens
+    secureJsonData:
+      password: ${CLICKHOUSE_PASSWORD}

@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Vet
+        run: go vet ./...
+      - name: Unit and golden tests (race detector)
+        run: go test -race -count=1 ./...
+      - name: Benchmarks compile and run once
+        run: go test -run '^$' -bench . -benchtime 1x ./internal/...
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:26.8-alpine
+        env:
+          CLICKHOUSE_USER: mevlens
+          CLICKHOUSE_PASSWORD: ci-password
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "0"
+        ports: ["9000:9000"]
+        options: >-
+          --health-cmd "wget -qO- http://127.0.0.1:8123/ping"
+          --health-interval 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: ClickHouse integration tests
+        env:
+          MEVLENS_CH_ADDR: 127.0.0.1:9000
+          MEVLENS_CH_USER: mevlens
+          MEVLENS_CH_PASSWORD: ci-password
+        run: go test -tags integration -count=1 ./internal/store/...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.14.0
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...

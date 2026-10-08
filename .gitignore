@@ -1,0 +1,19 @@
+# Build output
+/bin/
+coverage.out
+
+# Runtime artefacts
+*.trace
+
+# Local secrets (compose auto-loads deploy/.env)
+.env
+deploy/.env
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Test binaries (go test -c)
+*.test

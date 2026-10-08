@@ -1,0 +1,59 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - bodyclose
+    - depguard
+    - errorlint
+    - gocritic
+    - misspell
+    - nilerr
+    - noctx
+    - prealloc
+    - revive
+    - unconvert
+    - usestdlibvars
+  settings:
+    depguard:
+      rules:
+        # The deterministic core must never perform I/O or read the clock:
+        # replays and golden tests depend on it.
+        pure-core:
+          files:
+            - "**/internal/classify/*.go"
+            - "**/internal/dex/*.go"
+            - "**/internal/pricing/*.go"
+            - "!**/*_test.go"
+          deny:
+            - pkg: net
+              desc: the core is pure; do I/O in the observe/rpc/store layers
+            - pkg: net/http
+              desc: the core is pure; do I/O in the observe/rpc/store layers
+            - pkg: os
+              desc: the core is pure; do I/O in the observe/rpc/store layers
+            - pkg: time
+              desc: the core must not read the clock; pass time in as data
+            - pkg: github.com/huynhnhatkhanh/mevlens/internal/rpc
+              desc: the core is pure; resolve data before classification
+            - pkg: github.com/huynhnhatkhanh/mevlens/internal/store
+              desc: the core is pure; persistence belongs to the sink
+    revive:
+      rules:
+        - name: exported
+          disabled: true # internal packages; doc comments are reviewed by hand
+  exclusions:
+    presets:
+      - std-error-handling
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/huynhnhatkhanh/mevlens
