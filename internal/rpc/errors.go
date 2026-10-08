@@ -83,6 +83,15 @@ func IsRetryable(err error) bool {
 	}
 	var re *Error
 	if errors.As(err, &re) {
+		// The contract's own answer is final, whatever its revert reason says
+		// ("try again", "timeout", ...).
+		if IsExecutionError(err) {
+			return false
+		}
+		// A backend that has not seen the block yet: it will, or another one has.
+		if IsUnknownBlock(err) {
+			return true
+		}
 		switch re.Code {
 		case -32005, // limit exceeded (EIP-1474)
 			-32603, // internal error (often a transient backend failure)
@@ -107,6 +116,12 @@ func IsUnsupported(err error) bool {
 	}
 	if re.Code == -32601 { // method not found
 		return true
+	}
+	// A revert reason is chosen by the contract ("function not supported") and
+	// pruned state ("historical state ... is not available") concerns one height,
+	// not the method: neither says anything about what the endpoint offers.
+	if IsExecutionError(err) || IsMissingState(err) || IsUnknownBlock(err) {
+		return false
 	}
 	msg := strings.ToLower(re.Message)
 	return strings.Contains(msg, "not supported") || strings.Contains(msg, "not available") ||
@@ -139,6 +154,51 @@ func IsRevert(err error) bool {
 		return false
 	}
 	return re.Code == 3 || strings.Contains(strings.ToLower(re.Message), "execution reverted")
+}
+
+// IsExecutionError reports whether eth_call failed inside the EVM: a revert, or a
+// deterministic exceptional halt (invalid opcode, out of gas, stack errors, ...).
+// Such failures are properties of the called contract, so retrying is pointless.
+func IsExecutionError(err error) bool {
+	if IsRevert(err) {
+		return true
+	}
+	var re *Error
+	if !errors.As(err, &re) {
+		return false
+	}
+	// Phrasings of go-ethereum's vm errors, which Nitro inherits.
+	return containsAny(strings.ToLower(re.Message), "invalid opcode", "out of gas", "stack underflow",
+		"stack overflow", "invalid jump destination", "write protection", "return data out of bounds")
+}
+
+// IsUnknownBlock reports whether the serving backend does not have the requested
+// block yet (typically a node lagging behind the head).
+func IsUnknownBlock(err error) bool {
+	var re *Error
+	if !errors.As(err, &re) {
+		return false
+	}
+	return containsAny(strings.ToLower(re.Message), "header not found", "unknown block", "block not found")
+}
+
+// IsMissingState reports whether the serving node has pruned the state needed to
+// answer at the requested height (a non-archive node asked about old blocks).
+func IsMissingState(err error) bool {
+	var re *Error
+	if !errors.As(err, &re) {
+		return false
+	}
+	return containsAny(strings.ToLower(re.Message), "historical state", "missing trie node", "state not available", "state is not available")
+}
+
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // redactURL removes the request URL (which may embed an API key) from net/http errors.

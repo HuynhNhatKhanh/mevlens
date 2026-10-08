@@ -419,3 +419,173 @@ func TestLogRangeRefusedEverywhereIsReported(t *testing.T) {
 		t.Fatal("a rate limit must not be mistaken for a range refusal")
 	}
 }
+
+func TestErrorClassification(t *testing.T) {
+	revertNotSupported := &Error{Code: 3, Message: "execution reverted: function not supported"}
+	pruned := &Error{Code: -32000, Message: "historical state 79ff2b is not available"}
+	for _, e := range []*Error{revertNotSupported, pruned, {Code: -32000, Message: "header not found"}} {
+		if IsUnsupported(e) {
+			t.Errorf("IsUnsupported(%q) = true: says nothing about the method", e.Message)
+		}
+	}
+	for _, msg := range []string{"execution reverted", "invalid opcode: INVALID", "out of gas", "stack underflow (0 <=> 1)"} {
+		if !IsExecutionError(&Error{Code: -32000, Message: msg}) {
+			t.Errorf("IsExecutionError(%q) = false", msg)
+		}
+	}
+	if IsExecutionError(&Error{Code: -32000, Message: "The method eth_call is not supported."}) {
+		t.Error("a missing method is not an execution error")
+	}
+	if IsRetryable(&Error{Code: -32000, Message: "execution reverted: try again later"}) {
+		t.Error("a revert is final whatever its reason says")
+	}
+	if !IsRetryable(&Error{Code: -32000, Message: "header not found"}) {
+		t.Error("a block the backend does not have yet is retryable")
+	}
+	if !IsMissingState(pruned) || IsMissingState(revertNotSupported) {
+		t.Error("IsMissingState misclassifies")
+	}
+}
+
+func TestRevertReasonDoesNotDisableMethod(t *testing.T) {
+	// Regression: a revert reason containing "not supported" marked eth_call
+	// unsupported on every endpoint for the life of the process.
+	node := &fakeNode{t: t, handle: func(round int, _ rpcReq) (string, *Error) {
+		if round == 0 {
+			return "", &Error{Code: 3, Message: "execution reverted: function not supported"}
+		}
+		return `"0x01"`, nil
+	}}
+	srv := httptest.NewServer(node)
+	defer srv.Close()
+	c := newClient(t, srv.URL)
+
+	err := c.Call(context.Background(), nil, "eth_call")
+	if !IsRevert(err) || errors.Is(err, ErrUnsupported) {
+		t.Fatalf("err = %v, want the revert itself", err)
+	}
+	var out string
+	if err := c.Call(context.Background(), &out, "eth_call"); err != nil || out != "0x01" {
+		t.Fatalf("eth_call after a revert = %q, %v; the method must stay usable", out, err)
+	}
+}
+
+func TestEndpointErrorsFailOver(t *testing.T) {
+	// Regression: HTTP 401/404 and malformed bodies were returned to the caller
+	// without trying the other endpoints, and reset the bad endpoint's health.
+	for _, status := range []int{http.StatusUnauthorized, http.StatusNotFound, http.StatusBadRequest} {
+		bad := &fakeNode{t: t, status: func(int) int { return status }, handle: func(int, rpcReq) (string, *Error) { return `"never"`, nil }}
+		healthy := &fakeNode{t: t, handle: func(int, rpcReq) (string, *Error) { return `"ok"`, nil }}
+		s1, s2 := httptest.NewServer(bad), httptest.NewServer(healthy)
+		c := newClient(t, s1.URL, s2.URL)
+		for range 6 {
+			var out string
+			if err := c.Call(context.Background(), &out, "eth_blockNumber"); err != nil || out != "ok" {
+				t.Fatalf("HTTP %d: Call = %q, %v; want failover to the healthy endpoint", status, out, err)
+			}
+		}
+		if c.endpoints[0].failureCount() == 0 {
+			t.Errorf("HTTP %d: failing endpoint has no recorded failure", status)
+		}
+		s1.Close()
+		s2.Close()
+	}
+
+	garbage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("<html>gateway</html>"))
+	}))
+	defer garbage.Close()
+	healthy := httptest.NewServer(&fakeNode{t: t, handle: func(int, rpcReq) (string, *Error) { return `"ok"`, nil }})
+	defer healthy.Close()
+	c := newClient(t, garbage.URL, healthy.URL)
+	for range 4 {
+		var out string
+		if err := c.Call(context.Background(), &out, "eth_blockNumber"); err != nil || out != "ok" {
+			t.Fatalf("malformed body: Call = %q, %v; want failover", out, err)
+		}
+	}
+}
+
+func TestForbiddenIsReprobedAfterTTL(t *testing.T) {
+	// Regression: one HTTP 403 blacklisted the method on the endpoint forever.
+	node := &fakeNode{t: t,
+		status: func(round int) int {
+			if round == 0 {
+				return http.StatusForbidden
+			}
+			return http.StatusOK
+		},
+		handle: func(int, rpcReq) (string, *Error) { return `"0x10"`, nil },
+	}
+	srv := httptest.NewServer(node)
+	defer srv.Close()
+	c := newClient(t, srv.URL)
+
+	if err := c.Call(context.Background(), nil, "eth_blockNumber"); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("err = %v, want ErrUnsupported while the refusal is remembered", err)
+	}
+	ep := c.endpoints[0]
+	ep.mu.Lock()
+	ep.unsupported["eth_blockNumber"] = time.Now().Add(-time.Second) // the TTL has elapsed
+	ep.mu.Unlock()
+	var out string
+	if err := c.Call(context.Background(), &out, "eth_blockNumber"); err != nil || out != "0x10" {
+		t.Fatalf("after the TTL: Call = %q, %v; want the endpoint asked again", out, err)
+	}
+}
+
+func TestForbiddenMixedBatchBlacklistsNothing(t *testing.T) {
+	node := &fakeNode{t: t,
+		status: func(round int) int {
+			if round == 0 {
+				return http.StatusForbidden
+			}
+			return http.StatusOK
+		},
+		handle: func(int, rpcReq) (string, *Error) { return `true`, nil },
+	}
+	srv := httptest.NewServer(node)
+	defer srv.Close()
+	reqs := []Request{{Method: "eth_getBlockByNumber"}, {Method: "eth_getBlockReceipts"}}
+	if err := newClient(t, srv.URL).Batch(context.Background(), reqs); err != nil {
+		t.Fatal(err)
+	}
+	if reqs[0].Err != nil || reqs[1].Err != nil {
+		t.Fatalf("a 403 to a mixed batch must be retried, not pinned on its methods: %v, %v", reqs[0].Err, reqs[1].Err)
+	}
+}
+
+func TestUnknownBlockFailsOverPerCall(t *testing.T) {
+	// A backend lagging behind the requested block is skipped for that call only.
+	lagging := &fakeNode{t: t, handle: func(_ int, r rpcReq) (string, *Error) {
+		if strings.Contains(string(r.Params), "0x64") {
+			return "", &Error{Code: -32000, Message: "header not found"}
+		}
+		return `"lagging"`, nil
+	}}
+	synced := &fakeNode{t: t, handle: func(int, rpcReq) (string, *Error) { return `"synced"`, nil }}
+	s1, s2 := httptest.NewServer(lagging), httptest.NewServer(synced)
+	defer s1.Close()
+	defer s2.Close()
+	c, _ := New(Config{
+		Endpoints:   []EndpointConfig{{URL: s1.URL}, {URL: s2.URL}},
+		BaseBackoff: time.Hour, MaxBackoff: time.Hour, // any backoff would hang the test
+	})
+	for range 4 {
+		var out string
+		if err := c.Call(context.Background(), &out, "eth_call", "0x64"); err != nil || out != "synced" {
+			t.Fatalf("Call = %q, %v", out, err)
+		}
+	}
+	seen := false
+	for range 4 { // the lagging endpoint still serves other heights
+		var out string
+		if err := c.Call(context.Background(), &out, "eth_call", "0x63"); err != nil {
+			t.Fatal(err)
+		}
+		seen = seen || out == "lagging"
+	}
+	if !seen {
+		t.Fatal("lagging endpoint was blacklisted for the method")
+	}
+}
