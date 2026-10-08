@@ -1,0 +1,4 @@
+# Golden files and fixtures are compared byte for byte: keep them LF on every
+# platform (core.autocrlf=true would otherwise check them out as CRLF on Windows).
+*.json text eol=lf
+*.golden.json text eol=lf
