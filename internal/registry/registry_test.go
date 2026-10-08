@@ -15,6 +15,10 @@ type fakeChain struct {
 	answers map[string]eth.Data
 	calls   int
 	failAll error
+	failTo  map[eth.Address]error  // per-contract eth_call error
+	failTag func(tag string) error // per-block-tag eth_call error
+	tags    []string               // block tag of every eth_call
+	msgs    []rpc.CallMsg          // call object of every eth_call
 	logs    func(rpc.LogQuery) ([]eth.Log, error)
 }
 
@@ -39,6 +43,18 @@ func (f *fakeChain) Batch(_ context.Context, reqs []rpc.Request) error {
 			continue
 		}
 		msg := reqs[i].Params[0].(rpc.CallMsg)
+		tag := reqs[i].Params[1].(string)
+		f.tags, f.msgs = append(f.tags, tag), append(f.msgs, msg)
+		if f.failTag != nil {
+			if err := f.failTag(tag); err != nil {
+				reqs[i].Err = err
+				continue
+			}
+		}
+		if err := f.failTo[msg.To]; err != nil {
+			reqs[i].Err = err
+			continue
+		}
 		ret, ok := f.answers[key(msg.To, msg.Data)]
 		if !ok {
 			reqs[i].Err = &rpc.Error{Code: 3, Message: "execution reverted"}
@@ -203,6 +219,77 @@ func TestOnlyRevertsAreCachedAsNotAPool(t *testing.T) {
 	}
 	if _, ok := r.Lookup(dex.PoolIDFromAddress(pairV2)); ok {
 		t.Fatal("pool cached after a non-revert error")
+	}
+}
+
+func TestExecutionFailureIsNotAPool(t *testing.T) {
+	// Regression: a contract emitting Swap-shaped logs whose getters hit INVALID
+	// (or loop until out of gas) made Resolve fail forever, halting the pipeline,
+	// and blocked the genuine pools of the same block.
+	for _, vmErr := range []string{"invalid opcode: INVALID", "out of gas", "stack underflow (0 <=> 1)"} {
+		chain := newChain()
+		chain.failTo = map[eth.Address]error{honeypot: &rpc.Error{Code: -32000, Message: vmErr}}
+		r := newRegistry(t, chain)
+		err := r.Resolve(context.Background(), 1, []dex.Candidate{cand(honeypot, dex.KindV2), cand(pairV2, dex.KindV2)})
+		if err != nil {
+			t.Fatalf("%s: Resolve = %v, want the failing contract classified as not a pool", vmErr, err)
+		}
+		if p, ok := r.Lookup(dex.PoolIDFromAddress(honeypot)); !ok || p.Canonical {
+			t.Fatalf("%s: failing contract = %+v, %v; want cached as not canonical", vmErr, p, ok)
+		}
+		if p, ok := r.Lookup(dex.PoolIDFromAddress(pairV2)); !ok || !p.Canonical {
+			t.Fatalf("%s: genuine pair in the same block = %+v, %v; want canonical", vmErr, p, ok)
+		}
+	}
+}
+
+func TestCallsArePinnedToTheBlock(t *testing.T) {
+	// Regression: calls at "latest" on an endpoint lagging behind the processed
+	// block saw a brand-new pool without code and cached it as not canonical.
+	chain := newChain()
+	r := newRegistry(t, chain)
+	if err := r.Resolve(context.Background(), 123, []dex.Candidate{cand(pairV2, dex.KindV2)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(chain.tags) == 0 {
+		t.Fatal("no eth_call made")
+	}
+	for i, tag := range chain.tags {
+		if tag != eth.FormatBlock(123) {
+			t.Fatalf("call %d at %q, want the processed block 0x7b", i, tag)
+		}
+		if chain.msgs[i].Gas != callGas {
+			t.Fatalf("call %d gas = %d, want the cap %d", i, chain.msgs[i].Gas, callGas)
+		}
+	}
+}
+
+func TestLaggingEndpointCachesNothing(t *testing.T) {
+	chain := newChain()
+	chain.failAll = &rpc.Error{Code: -32000, Message: "header not found"}
+	r := newRegistry(t, chain)
+	if err := r.Resolve(context.Background(), 1, []dex.Candidate{cand(pairV2, dex.KindV2)}); err == nil {
+		t.Fatal("a node without the block must fail the resolution")
+	}
+	if _, ok := r.Lookup(dex.PoolIDFromAddress(pairV2)); ok {
+		t.Fatal("pool cached although no endpoint had the block")
+	}
+}
+
+func TestPrunedStateFallsBackToLatest(t *testing.T) {
+	chain := newChain()
+	chain.failTag = func(tag string) error {
+		if tag != rpc.Latest {
+			return &rpc.Error{Code: -32000, Message: "historical state 79ff2b is not available"}
+		}
+		return nil
+	}
+	r := newRegistry(t, chain)
+	if err := r.Resolve(context.Background(), 1, []dex.Candidate{cand(pairV2, dex.KindV2)}); err != nil {
+		t.Fatal(err)
+	}
+	if p, ok := r.Lookup(dex.PoolIDFromAddress(pairV2)); !ok || !p.Canonical {
+		t.Fatalf("pair = %+v, %v; want canonical, read at latest", p, ok)
 	}
 }
 
