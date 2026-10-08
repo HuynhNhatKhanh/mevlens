@@ -88,7 +88,7 @@ func (o *Oracle) RefPool() eth.Address { return o.ref }
 
 // ObserveSwap updates the ETH/USD price when s is a swap on the reference pool.
 func (o *Oracle) ObserveSwap(s *dex.Swap, block uint64) {
-	if s.Pool != o.ref || s.Kind != dex.KindV3 || o.ref.IsZero() {
+	if s.Kind != dex.KindV3 || o.ref.IsZero() || s.Contract != o.ref {
 		return
 	}
 	o.SetSqrtPrice(&s.SqrtPriceX96, block)

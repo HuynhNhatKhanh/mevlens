@@ -101,6 +101,9 @@ func (h Hash) String() string { return h.Hex() }
 // IsZero reports whether h is all zeroes.
 func (h Hash) IsZero() bool { return h == Hash{} }
 
+// Compare orders hashes by their big-endian byte value.
+func (h Hash) Compare(o Hash) int { return bytes.Compare(h[:], o[:]) }
+
 // Address interprets the word as a left-padded ABI address (the low 20 bytes).
 func (h Hash) Address() Address {
 	var a Address

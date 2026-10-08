@@ -114,7 +114,7 @@ func summarize(res *classify.Result) goldenBlock {
 			PriorityWei: a.PriorityFeePerGas, GasUsed: a.GasUsed, Timeboosted: a.Timeboosted, Pools: []string{},
 		}
 		for _, p := range a.Pools {
-			ga.Pools = append(ga.Pools, p.Hex())
+			ga.Pools = append(ga.Pools, p.String())
 		}
 		g.Arbitrages = append(g.Arbitrages, ga)
 	}

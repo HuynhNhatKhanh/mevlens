@@ -113,6 +113,25 @@ func IsUnsupported(err error) bool {
 		strings.Contains(msg, "not whitelisted") || strings.Contains(msg, "method not found")
 }
 
+// IsLogRangeError reports whether an eth_getLogs request was refused because its
+// block span or result set is too large for the provider.
+func IsLogRangeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	// Phrasings seen from providers: Arbitrum ("query spans N blocks"), dRPC
+	// ("ranges over N blocks are not supported"), Alchemy ("block range",
+	// "response size exceeded"), Infura ("returned more than 10000 results").
+	// Deliberately not "limit exceeded": that is the -32005 rate-limit message.
+	for _, hint := range []string{"query spans", "ranges over", "block range", "range too large", "more than", "response size", "too many results", "too many logs"} {
+		if strings.Contains(msg, hint) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsRevert reports whether err is an EVM execution revert returned by eth_call.
 func IsRevert(err error) bool {
 	var re *Error

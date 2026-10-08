@@ -49,19 +49,19 @@ func Save(path string, v any) error {
 }
 
 // Lookup is a static registry for offline classification.
-type Lookup map[eth.Address]dex.Pool
+type Lookup map[dex.PoolID]dex.Pool
 
 // NewLookup indexes pools by address.
 func NewLookup(pools []dex.Pool) Lookup {
 	l := make(Lookup, len(pools))
 	for _, p := range pools {
-		l[p.Address] = p
+		l[p.ID] = p
 	}
 	return l
 }
 
 // Lookup implements classify.PoolLookup.
-func (l Lookup) Lookup(a eth.Address) (dex.Pool, bool) {
-	p, ok := l[a]
+func (l Lookup) Lookup(id dex.PoolID) (dex.Pool, bool) {
+	p, ok := l[id]
 	return p, ok
 }

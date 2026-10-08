@@ -55,7 +55,7 @@ func TestDecodeV2Swap(t *testing.T) {
 		LogIndex: 7,
 	}
 	s, ok := DecodeSwap(l)
-	if !ok || s.Kind != KindV2 || s.LogIndex != 7 || s.Pool != pool {
+	if !ok || s.Kind != KindV2 || s.LogIndex != 7 || s.Pool != PoolIDFromAddress(pool) {
 		t.Fatalf("decode failed: %+v", s)
 	}
 	zeroForOne, in, out, ok := s.Direction()
@@ -122,5 +122,83 @@ func BenchmarkDecodeV3Swap(b *testing.B) {
 		if _, ok := DecodeSwap(l); !ok {
 			b.Fatal("decode")
 		}
+	}
+}
+
+func TestV4TopicsMatchPublishedValues(t *testing.T) {
+	// Observed on Arbitrum One from the PoolManager 0x360e68fa…fb32.
+	if got := TopicV4Swap.Hex(); got != "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f" {
+		t.Errorf("v4 Swap topic = %s", got)
+	}
+	if got := TopicV4Initialize.Hex(); got != "0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438" {
+		t.Errorf("v4 Initialize topic = %s", got)
+	}
+}
+
+var (
+	manager = eth.MustAddress("0x360e68faccca8ca495c1b759fd9eee466db9fb32")
+	v4ID    = eth.MustHash("0x3e0dfbaee0c581f9b5c53e44461e21a51e9e06b67e8a0defd5d068a2fd423dab")
+)
+
+func TestDecodeV4SwapUsesSwapperSign(t *testing.T) {
+	// Real swap (tx 0xeac9…): the swapper received 4419590917081865 wei of native
+	// ETH (currency0, positive) and paid 5611771093812306903 of currency1 (negative).
+	l := &eth.Log{
+		Address: manager,
+		Topics:  []eth.Hash{TopicV4Swap, v4ID, {}},
+		Data:    concat(word(4419590917081865), negWord("5611771093812306903"), word(1), word(1), word(1), word(3000)),
+	}
+	s, ok := DecodeSwap(l)
+	if !ok || s.Kind != KindV4 || s.Pool != PoolID(v4ID) || s.Contract != manager {
+		t.Fatalf("decode = %+v %v", s, ok)
+	}
+	// Pool-side view: currency1 entered the pool, currency0 left it.
+	if s.Out0.Uint64() != 4419590917081865 || !s.In0.IsZero() || s.In1.Dec() != "5611771093812306903" || !s.Out1.IsZero() {
+		t.Fatalf("amounts: in0=%s out0=%s in1=%s out1=%s", s.In0.Dec(), s.Out0.Dec(), s.In1.Dec(), s.Out1.Dec())
+	}
+	if zeroForOne, _, _, _ := s.Direction(); zeroForOne {
+		t.Fatal("swapper paid currency1: direction must be oneForZero")
+	}
+}
+
+func negWord(dec string) []byte {
+	z, _ := uint256.FromDecimal(dec)
+	z.Neg(z)
+	b := z.Bytes32()
+	return b[:]
+}
+
+func TestDecodeV4Initialize(t *testing.T) {
+	token := eth.MustAddress("0x88a269df8fe7f53e590c561954c52fccc8ec0cfb")
+	hooks := eth.MustAddress("0x0000000000000000000000000000000000000c0c")
+	l := &eth.Log{
+		Address: manager,
+		Topics:  []eth.Hash{TopicV4Initialize, v4ID, {}, token.Word()}, // currency0 = native ETH
+		Data:    concat(word(3000), word(60), func() []byte { w := hooks.Word(); return w[:] }(), word(1), word(-5)),
+	}
+	p, ok := DecodeV4Initialize(l)
+	if !ok || p.ID != PoolID(v4ID) || p.Contract != manager || !p.Token0.IsZero() || p.Token1 != token || p.FeePips != 3000 || p.Hooks != hooks {
+		t.Fatalf("pool = %+v %v", p, ok)
+	}
+	l.Data = l.Data[:64]
+	if _, ok := DecodeV4Initialize(l); ok {
+		t.Fatal("short data accepted")
+	}
+}
+
+func TestPoolIDText(t *testing.T) {
+	a := eth.MustAddress("0x82af49447d8a07e3bd95bd0d56f35241523fbab1")
+	for _, id := range []PoolID{PoolIDFromAddress(a), PoolID(v4ID)} {
+		b, _ := id.MarshalText()
+		var back PoolID
+		if err := back.UnmarshalText(b); err != nil || back != id {
+			t.Fatalf("round trip %s: %v", b, err)
+		}
+	}
+	if s := PoolIDFromAddress(a).String(); s != a.Hex() {
+		t.Fatalf("address-form id renders as %s", s)
+	}
+	if _, ok := PoolID(v4ID).Address(); ok {
+		t.Fatal("a v4 id is not an address")
 	}
 }

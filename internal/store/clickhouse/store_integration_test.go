@@ -37,33 +37,47 @@ func openTestStore(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_ = s.conn.Exec(context.Background(), "DROP DATABASE IF EXISTS "+db)
+		if os.Getenv("MEVLENS_KEEP_DB") == "" {
+			_ = s.conn.Exec(context.Background(), "DROP DATABASE IF EXISTS "+db)
+		}
 		s.Close()
 	})
 	return s
 }
+
+var (
+	poolManager = addr(0x44)
+	v3          = dex.PoolIDFromAddress(addr(1))
+	v4Pool      = dex.PoolID(eth.MustHash("0x973b2ab0a510c8b3b6ffad2d1e4b1db1d0f0aa88f1d3b6f97a0f6b4e9e1d2c3a"))
+)
 
 func addr(b byte) eth.Address { var a eth.Address; a[19] = b; return a }
 
 func sampleBatch(block uint64, cp string) *observe.Batch {
 	h := eth.Uint64Word(block)
 	big, _ := uint256.FromDecimal("123456789012345678901234567890")
+
 	return &observe.Batch{
 		Blocks: []classify.BlockInfo{{Number: block, Hash: h, Timestamp: 1_790_000_000 + block, BaseFee: 10_000_000,
 			TxCount: 2, Swaps: 2, Arbs: 1, Regime: classify.RegimePGA}},
 		Swaps: []classify.SwapRow{
-			{Block: block, BlockHash: h, Timestamp: 1_790_000_000 + block, TxIndex: 0, LogIndex: 1, Pool: addr(1), Venue: "uniswap-v3",
+			{Block: block, BlockHash: h, Timestamp: 1_790_000_000 + block, TxIndex: 0, LogIndex: 1, Pool: v3, Contract: addr(1), Venue: "uniswap-v3",
 				TokenIn: addr(9), TokenOut: addr(8), AmountIn: *big, AmountOut: *uint256.NewInt(5)},
-			{Block: block, BlockHash: h, Timestamp: 1_790_000_000 + block, TxIndex: 0, LogIndex: 2, Pool: addr(2), Venue: "sushi-v2",
+			{Block: block, BlockHash: h, Timestamp: 1_790_000_000 + block, TxIndex: 0, LogIndex: 2, Pool: v4Pool, Contract: poolManager, Venue: "uniswap-v4",
 				TokenIn: addr(8), TokenOut: addr(9), AmountIn: *uint256.NewInt(5), AmountOut: *uint256.NewInt(7)},
 		},
 		Arbs: []classify.Arb{{
 			Block: block, BlockHash: h, Timestamp: 1_790_000_000 + block, Regime: classify.RegimePGA, TxIndex: 0,
-			From: addr(0xe0), To: addr(0xb0), Status: classify.StatusSuccess, Hops: 2, Pools: []eth.Address{addr(1), addr(2)},
+			From: addr(0xe0), To: addr(0xb0), Status: classify.StatusSuccess, Hops: 2,
+			Pools: []dex.PoolID{v3, v4Pool}, Contracts: []eth.Address{addr(1), poolManager},
 			ProfitToken: addr(9), Profit: *uint256.NewInt(2), ProfitTokens: 2, ProfitETH: 0.002, Valued: true,
 			GasUsed: 250_000, EffectiveGasPrice: 30_000_000, BaseFee: 10_000_000, PriorityFeePerGas: 20_000_000, CostETH: 0.0075,
 		}},
-		Pools:      []dex.Pool{{Address: addr(1), Kind: dex.KindV3, Canonical: true, Venue: "uniswap-v3", Token0: addr(8), Token1: addr(9), FeePips: 500, FirstSeen: block}},
+		Pools: []dex.Pool{
+			{ID: v3, Contract: addr(1), Kind: dex.KindV3, Canonical: true, Venue: "uniswap-v3", Token0: addr(8), Token1: addr(9), FeePips: 500, FirstSeen: block},
+			{ID: v4Pool, Contract: poolManager, Factory: poolManager, Kind: dex.KindV4, Canonical: true, Venue: "uniswap-v4",
+				Token0: addr(8), Token1: addr(9), FeePips: 3000, Hooks: addr(0x77), Native: true, FirstSeen: block},
+		},
 		Checkpoint: observe.Checkpoint{Name: cp, Block: block, Hash: h},
 	}
 }
@@ -82,7 +96,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	applied, err := s.Migrate(ctx)
-	if err != nil || len(applied) != 3 {
+	if err != nil || len(applied) != 4 {
 		t.Fatalf("migrate = %v, %v", applied, err)
 	}
 	if again, err := s.Migrate(ctx); err != nil || len(again) != 0 {
@@ -134,7 +148,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	if want := 20_000_000.0 * 250_000 / 1e18 / 0.002; bidShare == nil || *bidShare != want {
 		t.Fatalf("bid_share = %v, want %v", bidShare, want)
 	}
-	if !slices.Equal(pools, []string{addr(1).Hex(), addr(2).Hex()}) {
+	if !slices.Equal(pools, []string{addr(1).Hex(), eth.Hash(v4Pool).Hex()}) {
 		t.Fatalf("pools = %v", pools)
 	}
 
@@ -143,8 +157,22 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 
 	got, err := s.LoadPools(ctx)
-	if err != nil || len(got) != 1 || got[0].Address != addr(1) || got[0].Kind != dex.KindV3 || got[0].FeePips != 500 {
+	if err != nil || len(got) != 2 {
 		t.Fatalf("pools = %+v, %v", got, err)
+	}
+	byID := map[dex.PoolID]dex.Pool{got[0].ID: got[0], got[1].ID: got[1]}
+	if p := byID[v3]; p.Contract != addr(1) || p.Kind != dex.KindV3 || p.FeePips != 500 {
+		t.Fatalf("v3 pool = %+v", p)
+	}
+	if p := byID[v4Pool]; p.Contract != poolManager || p.Kind != dex.KindV4 || p.Hooks != addr(0x77) || !p.Native {
+		t.Fatalf("v4 pool = %+v", p)
+	}
+	var v4Rows uint64
+	if err := s.conn.QueryRow(ctx, "SELECT count() FROM swaps FINAL WHERE pool_id = ?", string(v4Pool[:])).Scan(&v4Rows); err != nil {
+		t.Fatal(err)
+	}
+	if v4Rows != 3 {
+		t.Fatalf("v4 swap rows by pool_id = %d, want 3", v4Rows)
 	}
 	bots, err := s.LoadBots(ctx)
 	if err != nil || len(bots) != 1 || bots[0] != addr(0xb0) {

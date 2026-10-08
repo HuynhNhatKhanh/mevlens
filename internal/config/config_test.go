@@ -24,7 +24,7 @@ func TestShippedConfigIsValid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Chain.ChainID != 42161 || len(c.RPC.Endpoints) < 2 || len(c.Factories()) != 5 {
+	if c.Chain.ChainID != 42161 || len(c.RPC.Endpoints) < 2 || len(c.Factories()) != 6 {
 		t.Fatalf("unexpected config: %+v", c.Chain)
 	}
 	if c.RPC.Timeout != 15*time.Second || c.Pipeline.PollInterval != 250*time.Millisecond {
@@ -57,15 +57,19 @@ func TestValidationReportsAllErrors(t *testing.T) {
 	_, err := Parse(`
 [[dex.factories]]
 name = "x"
-kind = "v4"
+kind = "v9"
 address = "0x0000000000000000000000000000000000000001"
+[[dex.factories]]
+name = "y"
+kind = "v4"
+address = "0x0000000000000000000000000000000000000002"
 [telemetry]
 log_format = "xml"
 `, env(nil))
 	if err == nil {
 		t.Fatal("expected errors")
 	}
-	for _, want := range []string{"chain_id", "rpc.endpoints", "kind must be v2 or v3", "pricing.weth", "log_format"} {
+	for _, want := range []string{"chain_id", "rpc.endpoints", "kind must be v2, v3 or v4", "v4 requires start_block", "pricing.weth", "log_format"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("missing %q in: %v", want, err)
 		}

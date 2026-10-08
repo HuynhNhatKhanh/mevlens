@@ -371,3 +371,51 @@ func TestIsRevert(t *testing.T) {
 		t.Fatal("non-revert classified as revert")
 	}
 }
+
+func TestLogRangeRefusalFailsOverPerCall(t *testing.T) {
+	// dRPC's free plan refuses eth_getLogs over 10k blocks while Arbitrum's public
+	// endpoint accepts 10M: the wide query must go to the endpoint that accepts it,
+	// without blacklisting the narrow one for other calls.
+	narrow := &fakeNode{t: t, handle: func(_ int, r rpcReq) (string, *Error) {
+		if r.Method == "eth_getLogs" {
+			return "", &Error{Code: 35, Message: "ranges over 10000 blocks are not supported on free plan"}
+		}
+		return `"0x1"`, nil
+	}}
+	wide := &fakeNode{t: t, handle: func(int, rpcReq) (string, *Error) { return `[]`, nil }}
+	s1, s2 := httptest.NewServer(narrow), httptest.NewServer(wide)
+	defer s1.Close()
+	defer s2.Close()
+
+	c, _ := New(Config{
+		Endpoints:   []EndpointConfig{{URL: s1.URL}, {URL: s2.URL}},
+		BaseBackoff: time.Hour, MaxBackoff: time.Hour, // no backoff may happen
+	})
+	for range 4 {
+		if _, err := c.Logs(context.Background(), LogQuery{From: 1, To: 10_000_000}); err != nil {
+			t.Fatalf("Logs: %v", err)
+		}
+	}
+	var out string
+	if err := c.Call(context.Background(), &out, "eth_blockNumber"); err != nil {
+		t.Fatal(err)
+	}
+	if len(narrow.rounds()) < 2 {
+		t.Fatal("narrow endpoint must stay eligible for other calls")
+	}
+}
+
+func TestLogRangeRefusedEverywhereIsReported(t *testing.T) {
+	node := &fakeNode{t: t, handle: func(int, rpcReq) (string, *Error) {
+		return "", &Error{Code: -32602, Message: "query spans 20000000 blocks, but only 10000000 are allowed"}
+	}}
+	srv := httptest.NewServer(node)
+	defer srv.Close()
+	_, err := newClient(t, srv.URL).Logs(context.Background(), LogQuery{From: 1, To: 20_000_000})
+	if !IsLogRangeError(err) || errors.Is(err, ErrUnsupported) {
+		t.Fatalf("err = %v, want a range error the caller can narrow", err)
+	}
+	if IsLogRangeError(&Error{Code: -32005, Message: "limit exceeded"}) {
+		t.Fatal("a rate limit must not be mistaken for a range refusal")
+	}
+}

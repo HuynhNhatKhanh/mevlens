@@ -36,7 +36,7 @@ func TestWETHAsToken0(t *testing.T) {
 		t.Fatal(err)
 	}
 	// $3000/ETH => raw = 3000e6 / 1e18 USDC base units per WETH base unit.
-	s := dex.Swap{Pool: ref, Kind: dex.KindV3, SqrtPriceX96: *sqrtPriceFor(3000e6 / 1e18)}
+	s := dex.Swap{Pool: dex.PoolIDFromAddress(ref), Contract: ref, Kind: dex.KindV3, SqrtPriceX96: *sqrtPriceFor(3000e6 / 1e18)}
 	o.ObserveSwap(&s, 42)
 	p, block, ok := o.ETHUSD()
 	if !ok || block != 42 || !near(p, 3000) {
@@ -83,7 +83,7 @@ func TestRejectsImplausiblePrices(t *testing.T) {
 	if o.SetSqrtPrice(new(uint256.Int), 1) {
 		t.Fatal("accepted zero price")
 	}
-	other := dex.Swap{Pool: usdc, Kind: dex.KindV3, SqrtPriceX96: *sqrtPriceFor(3000e6 / 1e18)}
+	other := dex.Swap{Pool: dex.PoolIDFromAddress(usdc), Contract: usdc, Kind: dex.KindV3, SqrtPriceX96: *sqrtPriceFor(3000e6 / 1e18)}
 	o.ObserveSwap(&other, 1)
 	if _, _, ok := o.ETHUSD(); ok {
 		t.Fatal("swaps on non-reference pools must be ignored")

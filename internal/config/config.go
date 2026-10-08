@@ -59,9 +59,10 @@ type DEX struct {
 }
 
 type Factory struct {
-	Name    string      `toml:"name"`
-	Kind    string      `toml:"kind"` // "v2" | "v3"
-	Address eth.Address `toml:"address"`
+	Name       string      `toml:"name"`
+	Kind       string      `toml:"kind"` // "v2" | "v3" | "v4" (v4: the PoolManager)
+	Address    eth.Address `toml:"address"`
+	StartBlock uint64      `toml:"start_block"` // v4: first block to index Initialize logs from
 }
 
 type Pricing struct {
@@ -210,8 +211,14 @@ func (c *Config) Validate() error {
 	}
 	factories := map[string]Factory{}
 	for i, f := range c.DEX.Factories {
-		if f.Kind != "v2" && f.Kind != "v3" {
-			errs = append(errs, fmt.Errorf("dex.factories[%d] (%s): kind must be v2 or v3", i, f.Name))
+		switch f.Kind {
+		case "v2", "v3":
+		case "v4":
+			if f.StartBlock == 0 {
+				errs = append(errs, fmt.Errorf("dex.factories[%d] (%s): v4 requires start_block", i, f.Name))
+			}
+		default:
+			errs = append(errs, fmt.Errorf("dex.factories[%d] (%s): kind must be v2, v3 or v4", i, f.Name))
 		}
 		if f.Address.IsZero() || f.Name == "" {
 			errs = append(errs, fmt.Errorf("dex.factories[%d]: name and address are required", i))
@@ -260,11 +267,9 @@ func (c *Config) RPCConfig() rpc.Config {
 func (c *Config) Factories() []registry.Factory {
 	out := make([]registry.Factory, 0, len(c.DEX.Factories))
 	for _, f := range c.DEX.Factories {
-		kind := dex.KindV2
-		if f.Kind == "v3" {
-			kind = dex.KindV3
-		}
-		out = append(out, registry.Factory{Name: f.Name, Address: f.Address, Kind: kind})
+		var kind dex.Kind
+		_ = kind.UnmarshalText([]byte(f.Kind)) // validated in Validate
+		out = append(out, registry.Factory{Name: f.Name, Address: f.Address, Kind: kind, StartBlock: f.StartBlock})
 	}
 	return out
 }

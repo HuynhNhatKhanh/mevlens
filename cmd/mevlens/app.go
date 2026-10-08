@@ -83,7 +83,7 @@ func newApp(ctx context.Context, configPath, listen string, stderr io.Writer) (*
 		log.Info("schema migrated", "applied", applied)
 	}
 
-	if a.reg, err = registry.New(a.client, cfg.Factories()); err != nil {
+	if a.reg, err = registry.New(a.client, cfg.Factories(), cfg.Pricing.WETH); err != nil {
 		return nil, err
 	}
 	pools, err := a.store.LoadPools(ctx)
@@ -91,6 +91,9 @@ func newApp(ctx context.Context, configPath, listen string, stderr io.Writer) (*
 		return nil, err
 	}
 	a.reg.Load(pools)
+	if err := a.syncV4Index(ctx); err != nil {
+		return nil, err
+	}
 	bots, err := a.store.LoadBots(ctx)
 	if err != nil {
 		return nil, err
@@ -104,6 +107,49 @@ func newApp(ctx context.Context, configPath, listen string, stderr io.Writer) (*
 	log.Info("state loaded", "pools", total, "canonical_pools", canonical, "known_bots", len(bots))
 	return a, nil
 }
+
+// syncV4Index indexes Uniswap v4 pools initialized up to the current head, so the
+// pipeline can resolve swaps on pools created before it started. Progress is
+// persisted after every scanned range: an interrupted sync resumes where it stopped.
+// Pools initialized later are picked up from the blocks the pipeline processes.
+func (a *app) syncV4Index(ctx context.Context) error {
+	managers := a.reg.Managers()
+	if len(managers) == 0 {
+		return nil
+	}
+	for _, m := range managers {
+		cp, ok, err := a.store.LoadCheckpoint(ctx, v4Checkpoint(m))
+		if err != nil {
+			return err
+		}
+		if ok {
+			a.reg.SetV4Synced(m.Address, cp.Block)
+		}
+	}
+	head, err := a.client.BlockNumber(ctx)
+	if err != nil {
+		return err
+	}
+	began, total := time.Now(), 0
+	err = a.reg.SyncV4(ctx, head, func(m registry.Factory, through uint64, found int) error {
+		total += found
+		fresh := a.reg.DrainNew()
+		if err := a.store.Write(ctx, &observe.Batch{Pools: fresh}); err != nil {
+			return err
+		}
+		a.log.Info("v4 pool index", "manager", m.Name, "through", through, "head", head, "new_pools", found)
+		return a.store.SaveCheckpoint(ctx, observe.Checkpoint{Name: v4Checkpoint(m), Block: through})
+	})
+	if err != nil {
+		return err
+	}
+	if total > 0 {
+		a.log.Info("v4 pool index synced", "pools", total, "elapsed", time.Since(began).Round(time.Second).String())
+	}
+	return nil
+}
+
+func v4Checkpoint(m registry.Factory) string { return "v4-index:" + m.Name }
 
 func (a *app) close() {
 	if a.flight != nil {

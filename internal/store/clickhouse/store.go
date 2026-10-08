@@ -201,8 +201,8 @@ func (s *Store) insertPools(ctx context.Context, pools []dex.Pool, now time.Time
 	return s.batch(ctx, "INSERT INTO pools", func(add func(...any) error) error {
 		for i := range pools {
 			p := &pools[i]
-			if err := add(p.Address[:], p.Kind.String(), p.Canonical, p.Venue, p.Factory[:], p.Token0[:], p.Token1[:],
-				p.FeePips, p.FirstSeen, now); err != nil {
+			if err := add(p.ID[:], p.Contract[:], p.Kind.String(), p.Canonical, p.Venue, p.Factory[:], p.Token0[:], p.Token1[:],
+				p.FeePips, p.Hooks[:], p.Native, p.FirstSeen, now); err != nil {
 				return err
 			}
 		}
@@ -233,8 +233,8 @@ func (s *Store) insertSwaps(ctx context.Context, swaps []classify.SwapRow) error
 	return s.batch(ctx, "INSERT INTO swaps", func(add func(...any) error) error {
 		for i := range swaps {
 			w := &swaps[i]
-			if err := add(w.Block, w.BlockHash[:], unix(w.Timestamp), w.TxIndex, w.LogIndex, w.TxHash[:], w.Pool[:], w.Venue,
-				w.TokenIn[:], w.TokenOut[:], w.AmountIn.ToBig(), w.AmountOut.ToBig()); err != nil {
+			if err := add(w.Block, w.BlockHash[:], unix(w.Timestamp), w.TxIndex, w.LogIndex, w.TxHash[:], w.Contract[:], w.Venue,
+				w.TokenIn[:], w.TokenOut[:], w.AmountIn.ToBig(), w.AmountOut.ToBig(), w.Pool[:]); err != nil {
 				return err
 			}
 		}
@@ -249,18 +249,22 @@ func (s *Store) insertArbs(ctx context.Context, arbs []classify.Arb) error {
 	return s.batch(ctx, "INSERT INTO arbitrages", func(add func(...any) error) error {
 		for i := range arbs {
 			a := &arbs[i]
-			pools := make([][]byte, len(a.Pools))
+			contracts := make([][]byte, len(a.Contracts))
+			for j := range a.Contracts {
+				contracts[j] = a.Contracts[j][:]
+			}
+			ids := make([][]byte, len(a.Pools))
 			for j := range a.Pools {
-				pools[j] = a.Pools[j][:]
+				ids[j] = a.Pools[j][:]
 			}
 			var profitETH *float64
 			if a.Valued {
 				profitETH = &a.ProfitETH
 			}
 			if err := add(a.Block, a.BlockHash[:], unix(a.Timestamp), a.Regime.String(), a.TxIndex, a.TxHash[:],
-				a.From[:], a.To[:], a.Status.String(), a.Hops, pools, a.ProfitToken[:], a.Profit.ToBig(), profitETH,
+				a.From[:], a.To[:], a.Status.String(), a.Hops, contracts, a.ProfitToken[:], a.Profit.ToBig(), profitETH,
 				a.GasUsed, a.GasUsedForL1, a.EffectiveGasPrice, a.BaseFee, a.PriorityFeePerGas, a.CostETH, a.Timeboosted,
-				a.ProfitTokens); err != nil {
+				a.ProfitTokens, ids); err != nil {
 				return err
 			}
 		}
@@ -333,8 +337,8 @@ func (s *Store) Rewind(ctx context.Context, checkpoint string, from uint64) erro
 
 // LoadPools returns every cached pool.
 func (s *Store) LoadPools(ctx context.Context) ([]dex.Pool, error) {
-	rows, err := s.conn.Query(ctx, `SELECT address, kind, canonical, venue, factory, token0, token1, fee_pips, first_seen
-		FROM pools FINAL`)
+	rows, err := s.conn.Query(ctx, `SELECT id, contract, kind, canonical, venue, factory, token0, token1,
+		fee_pips, hooks, native, first_seen FROM pools FINAL`)
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse: load pools: %w", err)
 	}
@@ -342,23 +346,22 @@ func (s *Store) LoadPools(ctx context.Context) ([]dex.Pool, error) {
 	var out []dex.Pool
 	for rows.Next() {
 		var (
-			p                             dex.Pool
-			addr, factory, token0, token1 string
-			kind                          string
+			p                                                dex.Pool
+			id, contract, factory, token0, token1, hooks, kd string
 		)
-		if err := rows.Scan(&addr, &kind, &p.Canonical, &p.Venue, &factory, &token0, &token1, &p.FeePips, &p.FirstSeen); err != nil {
+		if err := rows.Scan(&id, &contract, &kd, &p.Canonical, &p.Venue, &factory, &token0, &token1,
+			&p.FeePips, &hooks, &p.Native, &p.FirstSeen); err != nil {
 			return nil, err
 		}
-		copy(p.Address[:], addr)
+		if err := p.Kind.UnmarshalText([]byte(kd)); err != nil {
+			return nil, fmt.Errorf("clickhouse: load pools: %w", err)
+		}
+		copy(p.ID[:], id)
+		copy(p.Contract[:], contract)
 		copy(p.Factory[:], factory)
 		copy(p.Token0[:], token0)
 		copy(p.Token1[:], token1)
-		switch kind {
-		case "v2":
-			p.Kind = dex.KindV2
-		case "v3":
-			p.Kind = dex.KindV3
-		}
+		copy(p.Hooks[:], hooks)
 		out = append(out, p)
 	}
 	return out, rows.Err()

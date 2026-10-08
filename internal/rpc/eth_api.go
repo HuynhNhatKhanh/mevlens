@@ -89,3 +89,32 @@ func (c *Client) CallContract(ctx context.Context, to eth.Address, data eth.Data
 	}
 	return out, req[0].Err
 }
+
+// LogQuery is an eth_getLogs filter over an inclusive block range.
+type LogQuery struct {
+	Address eth.Address
+	From    uint64
+	To      uint64
+	Topics  [][]eth.Hash // per position: OR-list of accepted values (nil = any)
+}
+
+type logFilter struct {
+	Address   eth.Address  `json:"address"`
+	FromBlock string       `json:"fromBlock"`
+	ToBlock   string       `json:"toBlock"`
+	Topics    [][]eth.Hash `json:"topics"`
+}
+
+// Logs runs eth_getLogs. Providers cap the block span or the result size; such
+// refusals satisfy IsLogRangeError so callers can split the range and retry.
+func (c *Client) Logs(ctx context.Context, q LogQuery) ([]eth.Log, error) {
+	var out []eth.Log
+	f := logFilter{Address: q.Address, FromBlock: eth.FormatBlock(q.From), ToBlock: eth.FormatBlock(q.To), Topics: q.Topics}
+	if f.Topics == nil {
+		f.Topics = [][]eth.Hash{}
+	}
+	if err := c.Call(ctx, &out, "eth_getLogs", f); err != nil {
+		return nil, err
+	}
+	return out, nil
+}

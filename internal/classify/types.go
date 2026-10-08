@@ -3,6 +3,7 @@ package classify
 import (
 	"github.com/holiman/uint256"
 
+	"github.com/huynhnhatkhanh/mevlens/internal/dex"
 	"github.com/huynhnhatkhanh/mevlens/internal/eth"
 )
 
@@ -89,7 +90,8 @@ type SwapRow struct {
 	TxIndex   uint32
 	LogIndex  uint32
 	TxHash    eth.Hash
-	Pool      eth.Address
+	Pool      dex.PoolID
+	Contract  eth.Address // emitting contract (the pool, or the v4 PoolManager)
 	Venue     string
 	TokenIn   eth.Address
 	TokenOut  eth.Address
@@ -109,8 +111,9 @@ type Arb struct {
 	To        eth.Address // contract executing the arbitrage
 	Status    Status
 
-	Hops  uint8
-	Pools []eth.Address // pools in log order (empty for reverted attempts)
+	Hops      uint8
+	Pools     []dex.PoolID  // pools in log order (empty for reverted attempts)
+	Contracts []eth.Address // emitting contract of each hop (the PoolManager for v4)
 
 	ProfitToken  eth.Address // primary profit token (first in order of appearance)
 	Profit       uint256.Int // gross profit in ProfitToken base units

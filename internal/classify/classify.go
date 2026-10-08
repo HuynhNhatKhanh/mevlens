@@ -28,7 +28,7 @@ import (
 
 // PoolLookup returns cached pool metadata.
 type PoolLookup interface {
-	Lookup(addr eth.Address) (dex.Pool, bool)
+	Lookup(id dex.PoolID) (dex.Pool, bool)
 }
 
 // Classifier holds the state that carries across blocks: the ETH/USD oracle and
@@ -84,20 +84,38 @@ func New(pools PoolLookup, prices *pricing.Oracle, opts ...Option) *Classifier {
 // KnownBots returns the number of contracts known to perform arbitrage.
 func (c *Classifier) KnownBots() int { return len(c.bots) }
 
-// Candidates lists the emitters of swap-shaped logs in b, for the registry to
-// resolve before Classify runs. Duplicates are left to the registry.
+// Candidates lists the pools referenced by swap logs in b that the registry does
+// not know yet, plus every v4 pool initialized in b (which carries its own
+// metadata), so pools created and traded in the same block resolve immediately.
+// Duplicates are left to the registry.
 func (c *Classifier) Candidates(b *eth.Block) []dex.Candidate {
 	var out []dex.Candidate
 	for i := range b.Receipts {
 		for j := range b.Receipts[i].Logs {
 			l := &b.Receipts[i].Logs[j]
-			if len(l.Topics) == 0 || l.Removed {
+			if len(l.Topics) < 2 || l.Removed {
 				continue
 			}
-			if k := dex.KindOfTopic(l.Topics[0]); k != dex.KindUnknown {
-				if _, known := c.pools.Lookup(l.Address); !known {
-					out = append(out, dex.Candidate{Address: l.Address, Kind: k})
+			if l.Topics[0] == dex.TopicV4Initialize {
+				if p, ok := dex.DecodeV4Initialize(l); ok {
+					if _, known := c.pools.Lookup(p.ID); !known {
+						p.FirstSeen = uint64(b.Header.Number)
+						out = append(out, dex.Candidate{ID: p.ID, Contract: l.Address, Kind: dex.KindV4, Init: &p})
+					}
 				}
+				continue
+			}
+			var id dex.PoolID
+			switch k := dex.KindOfTopic(l.Topics[0]); k {
+			case dex.KindV2, dex.KindV3:
+				id = dex.PoolIDFromAddress(l.Address)
+			case dex.KindV4:
+				id = dex.PoolID(l.Topics[1])
+			default:
+				continue
+			}
+			if _, known := c.pools.Lookup(id); !known {
+				out = append(out, dex.Candidate{ID: id, Contract: l.Address, Kind: dex.KindOfTopic(l.Topics[0])})
 			}
 		}
 	}
@@ -151,7 +169,9 @@ func (c *Classifier) collectSwaps(res *Result, r *eth.Receipt) {
 			continue
 		}
 		p, ok := c.pools.Lookup(s.Pool)
-		if !ok || !p.Canonical || p.Kind != s.Kind {
+		// The emitter must match too: a v4 swap is only trusted from the PoolManager
+		// that initialized the pool.
+		if !ok || !p.Canonical || p.Kind != s.Kind || p.Contract != s.Contract {
 			continue
 		}
 		c.prices.ObserveSwap(&s, res.Block.Number)
@@ -160,7 +180,7 @@ func (c *Classifier) collectSwaps(res *Result, r *eth.Receipt) {
 		row := SwapRow{
 			Block: res.Block.Number, BlockHash: res.Block.Hash, Timestamp: res.Block.Timestamp,
 			TxIndex: uint32(r.TxIndex), LogIndex: s.LogIndex, TxHash: r.TxHash,
-			Pool: p.Address, Venue: p.Venue,
+			Pool: p.ID, Contract: s.Contract, Venue: p.Venue,
 		}
 		zeroForOne, in, out, ok := s.Direction()
 		if !ok {
@@ -228,9 +248,11 @@ func (c *Classifier) detect(blk *BlockInfo, r *eth.Receipt) (Arb, bool) {
 		a.ProfitETH = 0
 	}
 	a.Hops = uint8(min(len(c.txSwaps), 255))
-	a.Pools = make([]eth.Address, len(c.txSwaps))
+	a.Pools = make([]dex.PoolID, len(c.txSwaps))
+	a.Contracts = make([]eth.Address, len(c.txSwaps))
 	for i := range c.txSwaps {
-		a.Pools[i] = c.txSwaps[i].pool.Address
+		a.Pools[i] = c.txSwaps[i].pool.ID
+		a.Contracts[i] = c.txSwaps[i].swap.Contract
 	}
 	return a, true
 }

@@ -173,21 +173,36 @@ func (c *Client) Batch(ctx context.Context, reqs []Request) error {
 	return nil
 }
 
+// outcome classifies the failures of one round trip.
+type outcome uint8
+
+const (
+	outcomeDone      outcome = iota // nothing to retry
+	outcomeTransient                // retry after a backoff, possibly elsewhere
+	outcomeFailover                 // the endpoint lacks a method (remembered): try another now
+	outcomeTooWide                  // the endpoint refuses this request's size: try another now
+)
+
 func (c *Client) batchWithRetry(ctx context.Context, reqs []Request) error {
 	pending := make([]int, len(reqs))
 	for i := range reqs {
 		pending[i] = i
 		reqs[i].Err = nil
 	}
+	// Endpoints that refused this particular request as too wide (eth_getLogs
+	// ranges); other endpoints may accept it, so only this call skips them.
+	var tooWide map[*endpoint]bool
 	for attempt := 0; ; {
-		ep := c.pickEndpoint(reqs, pending)
+		ep := c.pickEndpoint(reqs, pending, tooWide)
 		if ep == nil {
-			for _, i := range pending {
-				reqs[i].Err = fmt.Errorf("%w: %s", ErrUnsupported, reqs[i].Method)
+			if len(tooWide) == 0 {
+				for _, i := range pending {
+					reqs[i].Err = fmt.Errorf("%w: %s", ErrUnsupported, reqs[i].Method)
+				}
 			}
-			return nil
+			return nil // with tooWide, reqs[i].Err holds the refusal: the caller narrows the request
 		}
-		failed, transient := c.roundTrip(ctx, ep, reqs, pending)
+		failed, kind := c.roundTrip(ctx, ep, reqs, pending)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
@@ -196,8 +211,15 @@ func (c *Client) batchWithRetry(ctx context.Context, reqs []Request) error {
 			return nil
 		}
 		pending = failed
-		if !transient {
-			continue // the endpoint lacks a method: fail over immediately, no backoff
+		switch kind {
+		case outcomeFailover:
+			continue
+		case outcomeTooWide:
+			if tooWide == nil {
+				tooWide = make(map[*endpoint]bool)
+			}
+			tooWide[ep] = true
+			continue
 		}
 		ep.markFailure(c.backoff(ep.failureCount()))
 		if attempt++; attempt >= c.cfg.MaxAttempts {
@@ -210,9 +232,8 @@ func (c *Client) batchWithRetry(ctx context.Context, reqs []Request) error {
 }
 
 // roundTrip sends the pending requests to ep and returns the indexes that should
-// be retried. transient is false when every failure was an unsupported method,
-// which is a property of the endpoint rather than a transient fault.
-func (c *Client) roundTrip(ctx context.Context, ep *endpoint, reqs []Request, pending []int) (failed []int, transient bool) {
+// be retried, with the most severe failure kind.
+func (c *Client) roundTrip(ctx context.Context, ep *endpoint, reqs []Request, pending []int) (failed []int, kind outcome) {
 	method := reqs[pending[0]].Method
 	if len(pending) > 1 {
 		method = "batch"
@@ -226,11 +247,22 @@ func (c *Client) roundTrip(ctx context.Context, ep *endpoint, reqs []Request, pe
 		for _, i := range pending {
 			reqs[i].Err = err
 		}
-		if IsRetryable(err) {
-			return pending, true
+		switch {
+		case tooWide(method, err):
+			return pending, outcomeTooWide
+		case methodRefused(err):
+			// e.g. a free endpoint answering eth_getLogs with HTTP 403: a property
+			// of the endpoint, not a transient fault. Learn it and fail over.
+			for _, i := range pending {
+				ep.markUnsupported(reqs[i].Method)
+			}
+			return pending, outcomeFailover
+		case IsRetryable(err):
+			return pending, outcomeTransient
 		}
-		return nil, false
+		return nil, outcomeDone
 	}
+	var transient, wide, missing bool
 	for _, i := range pending {
 		reqs[i].Err = nil // clear the outcome of a previous attempt
 		r, ok := resps[i]
@@ -248,15 +280,31 @@ func (c *Client) roundTrip(ctx context.Context, ep *endpoint, reqs []Request, pe
 		}
 		switch e := reqs[i].Err; {
 		case e == nil:
+		case tooWide(reqs[i].Method, e):
+			failed, wide = append(failed, i), true
 		case IsUnsupported(e):
 			ep.markUnsupported(reqs[i].Method)
-			failed = append(failed, i)
+			failed, missing = append(failed, i), true
 		case IsRetryable(e):
-			failed = append(failed, i)
-			transient = true
+			failed, transient = append(failed, i), true
 		}
 	}
-	return failed, transient
+	// Transient faults dominate (back off before anything else), then per-call
+	// refusals, then learned capability gaps.
+	switch {
+	case transient:
+		return failed, outcomeTransient
+	case wide:
+		return failed, outcomeTooWide
+	case missing:
+		return failed, outcomeFailover
+	}
+	return failed, outcomeDone
+}
+
+// tooWide reports an eth_getLogs request refused for its block span or result size.
+func tooWide(method string, err error) bool {
+	return (method == "eth_getLogs" || method == "batch") && IsLogRangeError(err)
 }
 
 type wireRequest struct {
@@ -361,10 +409,10 @@ func decodeResponses(raw []byte, byID map[uint64]int) (map[int]wireResponse, err
 	return out, nil
 }
 
-// pickEndpoint round-robins across endpoints that support every pending method
-// and are not cooling down. If all eligible endpoints are cooling down, the one
-// that recovers first is used. It returns nil when no endpoint supports the methods.
-func (c *Client) pickEndpoint(reqs []Request, pending []int) *endpoint {
+// pickEndpoint round-robins across endpoints that support every pending method,
+// are not excluded and are not cooling down. If all eligible endpoints are cooling
+// down, the one that recovers first is used. It returns nil when none is eligible.
+func (c *Client) pickEndpoint(reqs []Request, pending []int, exclude map[*endpoint]bool) *endpoint {
 	n := len(c.endpoints)
 	start := int(c.rr.Add(1) % uint64(n))
 	now := time.Now()
@@ -372,7 +420,7 @@ func (c *Client) pickEndpoint(reqs []Request, pending []int) *endpoint {
 	var bestUntil time.Time
 	for k := range n {
 		ep := c.endpoints[(start+k)%n]
-		if !ep.supportsAll(reqs, pending) {
+		if exclude[ep] || !ep.supportsAll(reqs, pending) {
 			continue
 		}
 		until := ep.cooldown()
@@ -438,6 +486,20 @@ func (e *endpoint) markSuccess() {
 	defer e.mu.Unlock()
 	e.failures = 0
 	e.cooldownUntil = time.Time{}
+}
+
+// methodRefused reports HTTP statuses that mean "this endpoint will not serve
+// these methods" rather than "try again later".
+func methodRefused(err error) bool {
+	var he *HTTPError
+	if !errors.As(err, &he) {
+		return false
+	}
+	switch he.Status {
+	case http.StatusForbidden, http.StatusMethodNotAllowed, http.StatusNotImplemented:
+		return true
+	}
+	return false
 }
 
 func sleep(ctx context.Context, d time.Duration) error {

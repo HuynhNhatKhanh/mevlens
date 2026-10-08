@@ -112,7 +112,7 @@ func (s *memSink) lastCheckpoint() Checkpoint {
 
 func newPipeline(t *testing.T, cfg Config, src BlockSource, sink Sink) *Pipeline {
 	t.Helper()
-	reg, err := registry.New(nil, nil)
+	reg, err := registry.New(nil, nil, eth.Address{})
 	if err != nil {
 		t.Fatal(err)
 	}

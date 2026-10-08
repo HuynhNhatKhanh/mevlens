@@ -1,7 +1,7 @@
 # MEVLens — Arbitrum Arbitrage Observatory
 
 A Go service that watches every block on Arbitrum One, detects atomic arbitrage on
-canonical Uniswap-style pools, and records who won, how much they made and how
+canonical Uniswap v2/v3/v4-style pools, and records who won, how much they made and how
 much they paid for transaction ordering, in ClickHouse, with Grafana dashboards.
 
 > **Status: Phase 0 (observatory).** MEVLens is a research tool. It only reads
@@ -55,6 +55,7 @@ Key decisions (each one is an ADR in [`docs/adr`](docs/adr)):
 | [Pool-side netting classifier](docs/adr/0004-netting-classifier.md) | Detection doesn't depend on guessing the beneficiary, so routers and profit forwarding don't fool it |
 | [Canonical pools via factory lookup](docs/adr/0005-canonical-pools.md) | Any contract can emit a fake `Swap` log. A pool counts only if its factory maps its tokens back to it |
 | [ClickHouse ReplacingMergeTree + rewind](docs/adr/0006-storage.md) | At-least-once delivery without duplicates. A reorg deletes the abandoned fork instead of filtering it forever |
+| [Uniswap v4](docs/adr/0007-uniswap-v4.md) | 32-byte pool ids, v4's opposite sign convention, a persisted `Initialize` index, and native ETH netted as WETH. All verified on mainnet |
 
 ## Quick start
 
@@ -76,13 +77,15 @@ CLICKHOUSE_ADDR=127.0.0.1:9000 CLICKHOUSE_USER=mevlens \
 ```
 
 `mevlens inspect -block N -dump DIR` writes a self-contained fixture (block,
-receipts, resolved pools, price seed) for golden tests.
+receipts, resolved pools, price seed) for golden tests. Without a database,
+`inspect` rebuilds the Uniswap v4 pool index on every run (~20–30 s);
+`follow`/`backfill` index once and persist it.
 
 ## Configuration
 
 [`configs/arbitrum-one.toml`](configs/arbitrum-one.toml) ships four free public
-endpoints, the canonical factories (Uniswap v2/v3, Sushi v2/v3, Camelot v2) and
-the pricing setup. Every address was verified on-chain. Secrets are referenced
+endpoints, the canonical factories (Uniswap v2/v3, Sushi v2/v3, Camelot v2), the
+Uniswap v4 PoolManager and the pricing setup. Every address was verified on-chain. Secrets are referenced
 as `${NAME}` and read from the environment. Unknown keys and unset variables are
 errors, not silent defaults.
 
@@ -95,9 +98,9 @@ Arbitrum produces about 4 blocks/s, so catching up after downtime is slow.
 | Table / view | Grain |
 |---|---|
 | `blocks` / `blocks_v` | one row per block (base fee, swaps, arbitrages, timeboosted txs, regime) |
-| `swaps` | every swap on a canonical pool |
+| `swaps` | every swap on a canonical pool (`pool_id`: address for v2/v3, PoolId for v4; `pool`: emitting contract) |
 | `arbitrages` / `arbitrages_v` | one row per arbitrage or reverted attempt (`profit_eth` sums every profitable token); the view adds `net_eth`, `bid_share` and hex addresses |
-| `pools` / `pools_v` | resolved pool metadata, including non-canonical (rejected) addresses |
+| `pools` / `pools_v` | resolved pool metadata, including non-canonical (rejected) addresses; v4 rows carry `hooks` and `native` |
 | `checkpoints` | last durable block per job |
 
 Find the Timeboost era from data (to fill `[regime]` in the config):
@@ -126,20 +129,21 @@ make lint     # golangci-lint v2, including the pure-core depguard rule
 make bench
 ```
 
-- **Golden tests on real blocks.** The fixtures in `internal/classify/testdata` are mainnet blocks. For the positive case, the expected profit was checked independently against the executing contract's net ERC-20 balance change from the receipt's `Transfer` logs (+24,062 USDC base units).
+- **Golden tests on real blocks.** The fixtures in `internal/classify/testdata` are mainnet blocks. Each expected arbitrage was recomputed by an independent script from raw chain data. One is v3-only (+24,062 USDC base units, matching the executor's ERC-20 transfers). Two route through Uniswap v4, with native ETH netted as WETH. In one of those, the executor's own balances don't change because profit is forwarded elsewhere.
 - **Deterministic concurrency tests.** Pipeline tests run under `testing/synctest`: random fetch latencies, reorgs, shutdown flushes. They use fake time and fail on leaked goroutines.
 - **Architecture test.** `internal/archtest` fails the build if the core (`eth`, `dex`, `pricing`, `classify`) or the pipeline (`observe`) depends on infrastructure, even indirectly. depguard covers direct imports such as `time`.
 - **RPC client.** Tests cover out-of-order batch responses, partial retries, 429 failover, endpoints that lack `eth_call`, and making sure errors never leak API keys.
 
 | Benchmark (amd64) | Result |
 |---|---|
-| Decode a v3 `Swap` log | ~20 ns/op, 0 allocs |
-| Parse an address | ~21 ns/op, 0 allocs |
-| Classify a block with a 2-hop arbitrage | ~0.6 µs/op |
+| Decode a v3 `Swap` log | ~37 ns/op, 0 allocs |
+| Parse an address | ~20 ns/op, 0 allocs |
+| Classify a block with a 2-hop arbitrage | ~0.7 µs/op |
 
 ## Known limitations
 
-- **Uniswap v4 is not decoded yet.** v4 swaps are emitted by the singleton PoolManager with a different event. In one 4,000-block sample there were 372 v4 swap logs next to about 1,400 v2/v3 swap transactions. Arbitrage routed through v4, PancakeSwap v3 or Algebra pools is currently missed. This is the top Phase 0 follow-up.
+- **Venues not decoded yet:** PancakeSwap v3, Algebra/Camelot v3, Balancer and Curve. Arbitrage with a leg on them is missed or partial. Uniswap v4 is supported ([ADR 0007](docs/adr/0007-uniswap-v4.md)).
+- Uniswap v4 hooks that return deltas can make the pool-side amounts differ slightly from what the trader paid. Hooked pools are flagged (`pools.hooks`), not excluded.
 - Profit is valued in ETH only when the profit token is WETH or a configured USD stablecoin. The dashboard reports valuation coverage.
 - Reverted attempts are attributed only to contracts that previously completed a detected arbitrage.
 - Backfilling is block-by-block (receipts). A logs-first backfill mode would make multi-week history cheap on free endpoints.
@@ -150,8 +154,8 @@ make bench
 cmd/mevlens            CLI: follow, backfill, inspect, migrate
 internal/eth           primitives and JSON-RPC wire types (no go-ethereum)
 internal/rpc           batched, rate-limited, failover JSON-RPC client
-internal/dex           Swap log decoding (v2/v3)
-internal/registry      canonical pool verification and cache
+internal/dex           pool identity and Swap/Initialize decoding (v2/v3/v4)
+internal/registry      canonical pool verification, v4 Initialize index, cache
 internal/pricing       ETH/USD oracle from a reference pool
 internal/classify      deterministic arbitrage classifier (the core)
 internal/observe       ordered fetch → single-writer processing → sink

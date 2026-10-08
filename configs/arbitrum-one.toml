@@ -34,7 +34,8 @@ name = "meowrpc"
 url = "https://arbitrum.meowrpc.com"
 rps = 4
 
-# Canonical factories. A pool counts only if its factory maps its tokens back to it.
+# Canonical factories. A v2/v3 pool counts only if its factory maps its tokens
+# back to it; a v4 pool only if it was initialized by the configured PoolManager.
 [[dex.factories]]
 name = "uniswap-v2"
 kind = "v2"
@@ -59,6 +60,14 @@ address = "0x1F98431c8aD98523631AE4a59f267346ea31F984"
 name = "sushi-v3"
 kind = "v3"
 address = "0x1af415a1EbA07a4986a52B6f2e7dE7003D82231e"
+
+# Uniswap v4 singleton PoolManager. start_block is the first Initialize log on
+# Arbitrum One (verified 2026-10-08); pools are indexed from there once at startup.
+[[dex.factories]]
+name = "uniswap-v4"
+kind = "v4"
+address = "0x360E68faCcca8cA495c1B759Fd9EEe466db9FB32"
+start_block = 298076243
 
 [pricing]
 weth = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"

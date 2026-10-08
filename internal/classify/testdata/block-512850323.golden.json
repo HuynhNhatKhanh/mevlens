@@ -1,0 +1,22 @@
+{
+  "block": 512850323,
+  "txs": 11,
+  "swaps": 2,
+  "arbitrages": [
+    {
+      "tx": "0xeac92468a4fd4748e3d5352e98d7b7f99fbc9512fa7533ae47505d453df9215e",
+      "status": "success",
+      "contract": "0x5dbcbd2669e44285547aa9428d16ebe26963d6c6",
+      "hops": 2,
+      "pools": [
+        "0x3e0dfbaee0c581f9b5c53e44461e21a51e9e06b67e8a0defd5d068a2fd423dab",
+        "0x53d3e59faac08184720bcb2816f4cf5b36d6767d"
+      ],
+      "profit_token": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "profit_raw": "4676250489790",
+      "priority_fee_per_gas_wei": 612703,
+      "gas_used": 219973,
+      "timeboosted": false
+    }
+  ]
+}

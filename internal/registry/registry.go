@@ -1,13 +1,18 @@
-// Package registry decides which contracts are canonical AMM pools.
+// Package registry decides which pools are canonical and resolves their metadata.
 //
 // Any contract can emit a log that looks like a Uniswap Swap (honeypots do exactly
-// that). A pool is canonical only if a configured factory, asked for the pool of
-// the pool's own (token0, token1[, fee]), answers with the pool's address. Results
-// (positive and negative) are cached, so each address costs two batched round trips
-// at most once in its lifetime.
+// that).
+//   - v2/v3: a pool is canonical only if a configured factory, asked for the pool
+//     of the pool's own (token0, token1[, fee]), answers with the pool's address.
+//     Results (positive and negative) are cached, so each address costs two batched
+//     round trips at most once in its lifetime.
+//   - v4: pools live inside a singleton PoolManager and are identified by a bytes32
+//     id. Swap logs carry no tokens; they come from the pool's Initialize log, which
+//     is read either from the blocks being processed or, for older pools, from a
+//     one-off index sync (SyncV4). Only logs emitted by a configured PoolManager count.
 //
 // A Registry is not safe for concurrent use: it is owned by the single processing
-// goroutine of the observatory pipeline.
+// goroutine of the observatory pipeline (and by startup code before it runs).
 package registry
 
 import (
@@ -20,16 +25,18 @@ import (
 	"github.com/huynhnhatkhanh/mevlens/internal/rpc"
 )
 
-// Factory is a trusted pool factory.
+// Factory is a trusted pool factory, or for v4 a trusted PoolManager.
 type Factory struct {
-	Name    string // e.g. "uniswap-v3"; used as the pool's venue label
-	Address eth.Address
-	Kind    dex.Kind
+	Name       string // e.g. "uniswap-v3"; used as the pool's venue label
+	Address    eth.Address
+	Kind       dex.Kind
+	StartBlock uint64 // v4: first block to scan for Initialize logs
 }
 
 // Caller is the subset of *rpc.Client the registry needs.
 type Caller interface {
 	Batch(ctx context.Context, reqs []rpc.Request) error
+	Logs(ctx context.Context, q rpc.LogQuery) ([]eth.Log, error)
 }
 
 var (
@@ -43,23 +50,45 @@ var (
 
 // Registry caches pool metadata.
 type Registry struct {
-	caller    Caller
-	factories map[eth.Address]Factory
-	pools     map[eth.Address]dex.Pool
-	fresh     []dex.Pool // resolved since the last DrainNew, for persistence
+	caller      Caller
+	factories   map[eth.Address]Factory // v2/v3 factories
+	managers    map[eth.Address]Factory // v4 PoolManagers
+	nativeAlias eth.Address             // token that native ETH is netted as (WETH)
+	pools       map[dex.PoolID]dex.Pool
+	v4Synced    map[eth.Address]uint64 // highest block scanned for Initialize logs
+	fresh       []dex.Pool             // resolved since the last DrainNew, for persistence
 }
 
-// New builds an empty registry trusting the given factories.
-func New(caller Caller, factories []Factory) (*Registry, error) {
-	r := &Registry{caller: caller, factories: make(map[eth.Address]Factory, len(factories)), pools: make(map[eth.Address]dex.Pool)}
+// New builds an empty registry trusting the given factories and PoolManagers.
+// nativeAlias (WETH) is the token native ETH is netted as; it must be set when a
+// v4 manager is configured, so that WETH→ETH arbitrage legs cancel out.
+func New(caller Caller, factories []Factory, nativeAlias eth.Address) (*Registry, error) {
+	r := &Registry{
+		caller:      caller,
+		factories:   make(map[eth.Address]Factory),
+		managers:    make(map[eth.Address]Factory),
+		nativeAlias: nativeAlias,
+		pools:       make(map[dex.PoolID]dex.Pool),
+		v4Synced:    make(map[eth.Address]uint64),
+	}
 	for _, f := range factories {
-		if f.Kind != dex.KindV2 && f.Kind != dex.KindV3 {
-			return nil, fmt.Errorf("registry: factory %s has unsupported kind %s", f.Name, f.Kind)
-		}
 		if _, dup := r.factories[f.Address]; dup {
 			return nil, fmt.Errorf("registry: duplicate factory %s", f.Address)
 		}
-		r.factories[f.Address] = f
+		if _, dup := r.managers[f.Address]; dup {
+			return nil, fmt.Errorf("registry: duplicate factory %s", f.Address)
+		}
+		switch f.Kind {
+		case dex.KindV2, dex.KindV3:
+			r.factories[f.Address] = f
+		case dex.KindV4:
+			if nativeAlias.IsZero() {
+				return nil, fmt.Errorf("registry: v4 manager %s requires a native ETH alias (WETH)", f.Name)
+			}
+			r.managers[f.Address] = f
+		default:
+			return nil, fmt.Errorf("registry: factory %s has unsupported kind %s", f.Name, f.Kind)
+		}
 	}
 	return r, nil
 }
@@ -67,17 +96,17 @@ func New(caller Caller, factories []Factory) (*Registry, error) {
 // Load seeds the cache, e.g. from persistent storage at startup.
 func (r *Registry) Load(pools []dex.Pool) {
 	for _, p := range pools {
-		r.pools[p.Address] = p
+		r.pools[p.ID] = p
 	}
 }
 
-// Lookup returns cached metadata for addr.
-func (r *Registry) Lookup(addr eth.Address) (dex.Pool, bool) {
-	p, ok := r.pools[addr]
+// Lookup returns cached metadata for a pool.
+func (r *Registry) Lookup(id dex.PoolID) (dex.Pool, bool) {
+	p, ok := r.pools[id]
 	return p, ok
 }
 
-// Len returns the number of cached addresses and how many of them are canonical.
+// Len returns the number of cached pools and how many of them are canonical.
 func (r *Registry) Len() (total, canonical int) {
 	for _, p := range r.pools {
 		if p.Canonical {
@@ -87,18 +116,38 @@ func (r *Registry) Len() (total, canonical int) {
 	return len(r.pools), canonical
 }
 
-// DrainNew returns pools resolved since the previous call, in address order.
+// DrainNew returns pools resolved since the previous call, in ID order.
 func (r *Registry) DrainNew() []dex.Pool {
 	out := r.fresh
 	r.fresh = nil
-	slices.SortFunc(out, func(a, b dex.Pool) int { return a.Address.Compare(b.Address) })
+	slices.SortFunc(out, func(a, b dex.Pool) int { return eth.Hash(a.ID).Compare(eth.Hash(b.ID)) })
 	return out
 }
 
 // Resolve resolves every unknown candidate. It returns an error only for transient
 // RPC failures, in which case nothing is cached and the caller should retry.
+//
+// v4 pools are resolved from Initialize candidates only. A swap on a v4 pool that
+// is still unknown (initialized before the index sync) is left unresolved and not
+// cached, so classification skips it rather than guessing.
 func (r *Registry) Resolve(ctx context.Context, block uint64, cands []dex.Candidate) error {
-	todo := r.unknown(cands)
+	var todo []dex.Candidate
+	seen := make(map[dex.PoolID]bool, len(cands))
+	for _, c := range cands {
+		if _, known := r.pools[c.ID]; known || seen[c.ID] {
+			continue
+		}
+		switch c.Kind {
+		case dex.KindV4:
+			if c.Init != nil {
+				seen[c.ID] = true
+				r.addV4(*c.Init)
+			}
+		case dex.KindV2, dex.KindV3:
+			seen[c.ID] = true
+			todo = append(todo, c)
+		}
+	}
 	if len(todo) == 0 {
 		return nil
 	}
@@ -110,23 +159,28 @@ func (r *Registry) Resolve(ctx context.Context, block uint64, cands []dex.Candid
 		return err
 	}
 	for _, p := range pools {
-		r.pools[p.Address] = p
+		r.pools[p.ID] = p
 		r.fresh = append(r.fresh, p)
 	}
 	return nil
 }
 
-func (r *Registry) unknown(cands []dex.Candidate) []dex.Candidate {
-	var todo []dex.Candidate
-	seen := make(map[eth.Address]bool, len(cands))
-	for _, c := range cands {
-		if _, known := r.pools[c.Address]; known || seen[c.Address] || c.Kind == dex.KindUnknown {
-			continue
-		}
-		seen[c.Address] = true
-		todo = append(todo, c)
+// addV4 records a pool decoded from an Initialize log, if it comes from a trusted
+// PoolManager. Native ETH is aliased so netting treats ETH and WETH as one asset.
+func (r *Registry) addV4(p dex.Pool) {
+	m, ok := r.managers[p.Contract]
+	if !ok {
+		return // an Initialize-shaped log from an untrusted contract: ignore, do not cache
 	}
-	return todo
+	if _, known := r.pools[p.ID]; known {
+		return
+	}
+	p.Kind, p.Canonical, p.Venue, p.Factory = dex.KindV4, true, m.Name, m.Address
+	if p.Token0.IsZero() { // Currency.wrap(address(0)) is native ETH and always sorts first
+		p.Token0, p.Native = r.nativeAlias, true
+	}
+	r.pools[p.ID] = p
+	r.fresh = append(r.fresh, p)
 }
 
 // readImmutables reads factory(), token0(), token1() and, for v3, fee() of each candidate.
@@ -137,12 +191,12 @@ func (r *Registry) readImmutables(ctx context.Context, block uint64, todo []dex.
 	for i, c := range todo {
 		s := &slots[i]
 		reqs = append(reqs,
-			rpc.NewCall(c.Address, selFactory.Calldata(), rpc.Latest, &s.factory),
-			rpc.NewCall(c.Address, selToken0.Calldata(), rpc.Latest, &s.token0),
-			rpc.NewCall(c.Address, selToken1.Calldata(), rpc.Latest, &s.token1),
+			rpc.NewCall(c.Contract, selFactory.Calldata(), rpc.Latest, &s.factory),
+			rpc.NewCall(c.Contract, selToken0.Calldata(), rpc.Latest, &s.token0),
+			rpc.NewCall(c.Contract, selToken1.Calldata(), rpc.Latest, &s.token1),
 		)
 		if c.Kind == dex.KindV3 {
-			reqs = append(reqs, rpc.NewCall(c.Address, selFee.Calldata(), rpc.Latest, &s.fee))
+			reqs = append(reqs, rpc.NewCall(c.Contract, selFee.Calldata(), rpc.Latest, &s.fee))
 		}
 	}
 	if err := r.caller.Batch(ctx, reqs); err != nil {
@@ -164,9 +218,9 @@ func (r *Registry) readImmutables(ctx context.Context, block uint64, todo []dex.
 
 	pools := make([]dex.Pool, len(todo))
 	for i, c := range todo {
-		p := dex.Pool{Address: c.Address, Kind: c.Kind, FirstSeen: block}
+		p := dex.Pool{ID: c.ID, Contract: c.Contract, Kind: c.Kind, FirstSeen: block}
 		s := &slots[i]
-		if !failed[c.Address] {
+		if !failed[c.Contract] {
 			p.Factory, _ = wordAddress(s.factory)
 			p.Token0, _ = wordAddress(s.token0)
 			p.Token1, _ = wordAddress(s.token1)
@@ -209,11 +263,11 @@ func (r *Registry) verifyWithFactories(ctx context.Context, pools []dex.Pool) er
 		i := idx[k]
 		if q.Err != nil {
 			if !rpc.IsRevert(q.Err) {
-				return fmt.Errorf("registry: verify pool %s: %w", pools[i].Address, q.Err)
+				return fmt.Errorf("registry: verify pool %s: %w", pools[i].Contract, q.Err)
 			}
 			continue
 		}
-		if got, ok := wordAddress(answers[i]); ok && got == pools[i].Address {
+		if got, ok := wordAddress(answers[i]); ok && got == pools[i].Contract {
 			pools[i].Canonical = true
 			pools[i].Venue = r.factories[pools[i].Factory].Name
 		}

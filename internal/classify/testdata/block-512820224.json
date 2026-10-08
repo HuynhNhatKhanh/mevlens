@@ -59,6 +59,7 @@
             "data": "0x00000000000000000000000000000000000000000000000000000000009aa347",
             "logIndex": "0x0",
             "transactionIndex": "0x1",
+            "blockNumber": "0x1e910400",
             "removed": false
           }
         ]
@@ -87,6 +88,7 @@
             "data": "0x00000000000000000000000000000000000000000000000000174320bb3214cd",
             "logIndex": "0x1",
             "transactionIndex": "0x2",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -99,6 +101,7 @@
             "data": "0x00000000000000000000000000000000000000000000000000000000007fb2b30000000000000000000000000000000000000000000000000016667aa580c74200000000000000000000000000f745da000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000138000000000000000000000000000000000000000000000000000001259dee54c90000000000000000000000000000000000000000000000000000001d5c97d547",
             "logIndex": "0x2",
             "transactionIndex": "0x2",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -111,6 +114,7 @@
             "data": "0x00000000000000000000000000000000000000000000000000000000007fb2b20000000000000000000000000000000000000000000000000000dc8791e4be4700000000000000000000000000097ff10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000028480000000000000000000000000000000000000000000000000000000b880f43e3000000000000000000000000000000000000000000000000000000012734b9fd",
             "logIndex": "0x3",
             "transactionIndex": "0x2",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -123,6 +127,7 @@
             "data": "0x000000000000000000000000000000000000000000000000000000000100c5cb",
             "logIndex": "0x4",
             "transactionIndex": "0x2",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -135,6 +140,7 @@
             "data": "0x0000000000000000000000000000000000000000000000000000000001009202",
             "logIndex": "0x5",
             "transactionIndex": "0x2",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -147,6 +153,7 @@
             "data": "0xffffffffffffffffffffffffffffffffffffffffffffffffffe8bcdf44cdeb33000000000000000000000000000000000000000000000000000000000100920200000000000000000000000000000000000000000003522a1b7d26a45e54ee4e00000000000000000000000000000000000000000000000000244f1d1045048cfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffcfb4c",
             "logIndex": "0x6",
             "transactionIndex": "0x2",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -159,6 +166,7 @@
             "data": "0x00000000000000000000000000000000000000000000000000000000000033c9",
             "logIndex": "0x7",
             "transactionIndex": "0x2",
+            "blockNumber": "0x1e910400",
             "removed": false
           }
         ]
@@ -187,6 +195,7 @@
             "data": "0x0000000000000000000000000000000000000000000000000bef55718ad60000",
             "logIndex": "0x8",
             "transactionIndex": "0x3",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -199,6 +208,7 @@
             "data": "0x0000000000000000000000000000000000000000000000000000000006944bff",
             "logIndex": "0x9",
             "transactionIndex": "0x3",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -211,6 +221,7 @@
             "data": "0x0000000000000000000000000000000000000000000000000098c445ad578000",
             "logIndex": "0xa",
             "transactionIndex": "0x3",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -223,6 +234,7 @@
             "data": "0x0000000000000000000000000000000000000000000000000098c445ad578000fffffffffffffffffffffffffffffffffffffffffffffffffffffffff96bb4010000000000000000000000000000000000000000000351fbb8355dfdd77de4a600000000000000000000000000000000000000000000000000244f1d1045048cfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffcfb47",
             "logIndex": "0xb",
             "transactionIndex": "0x3",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -235,6 +247,7 @@
             "data": "0x000000000000000000000000000000000000000000000000000000006fde84c3",
             "logIndex": "0xc",
             "transactionIndex": "0x3",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -247,6 +260,7 @@
             "data": "0x0000000000000000000000000000000000000000000000000a2508a082cf8000",
             "logIndex": "0xd",
             "transactionIndex": "0x3",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -259,6 +273,7 @@
             "data": "0x0000000000000000000000000000000000000000000000000a2508a082cf8000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff90217b3d000000000000000000000000000000000000000000035251f747f83e019a86720000000000000000000000000000000000000000000000002b8c643d378ba4fefffffffffffffffffffffffffffffffffffffffffffffffffffffffffffcfb4f",
             "logIndex": "0xe",
             "transactionIndex": "0x3",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -271,6 +286,7 @@
             "data": "0xfffffffffffffffffffffffffffffffffffffffffffffffffece7774a5510000000000000000000000000000000000000000000000000000000000000d290c2f000000000000000000000000000000000000000000035252399205872a954a1400000000000000000000000000000000000000000000000000c614685dea5ffbfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffcfb4f0000000000000000000000000000000000000000000000000000000000000271",
             "logIndex": "0xf",
             "transactionIndex": "0x3",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -283,6 +299,7 @@
             "data": "0x0000000000000000000000000000000000000000000000000131888b5aaf0000",
             "logIndex": "0x10",
             "transactionIndex": "0x3",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -295,6 +312,7 @@
             "data": "0x000000000000000000000000000000000000000000000000000000000d290c2f",
             "logIndex": "0x11",
             "transactionIndex": "0x3",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -307,6 +325,7 @@
             "data": "0x00000000000000000000000000000000000000000000000000000000839bdcf1",
             "logIndex": "0x12",
             "transactionIndex": "0x3",
+            "blockNumber": "0x1e910400",
             "removed": false
           }
         ]
@@ -335,6 +354,7 @@
             "data": "0x00000000000000000000000000000000000000000000000000325a93dece1019",
             "logIndex": "0x13",
             "transactionIndex": "0x4",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -347,6 +367,7 @@
             "data": "0xffffffffffffffffffffffffffffffffffffffffffffffffffcda56c2131efe700000000000000000000000000000000000000000000000000000000022b85870000000000000000000000000000000000000000000352857173d3c479294a9e000000000000000000000000000000000000000000000000000535ba7c6299aefffffffffffffffffffffffffffffffffffffffffffffffffffffffffffcfb5400000000000000000000000000000000000000000000000000000000000003e8",
             "logIndex": "0x14",
             "transactionIndex": "0x4",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -359,6 +380,7 @@
             "data": "0x00000000000000000000000000000000000000000000000000325a93dece1019",
             "logIndex": "0x15",
             "transactionIndex": "0x4",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -371,6 +393,7 @@
             "data": "0x00000000000000000000000000000000000000000000000000000000022b3276",
             "logIndex": "0x16",
             "transactionIndex": "0x4",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -383,6 +406,7 @@
             "data": "0x0000000000000000000000000000000000000000000000000000000000005311",
             "logIndex": "0x17",
             "transactionIndex": "0x4",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -395,6 +419,7 @@
             "data": "0xffffffffffffffffffffffffffffffffffffffffffffffffffcda56c2131efe700000000000000000000000000000000000000000000000000000000022b327600000000000000000000000000000000000000000003520b02483924d58b4db300000000000000000000000000000000000000000000000000244f1d1045048cfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffcfb49",
             "logIndex": "0x18",
             "transactionIndex": "0x4",
+            "blockNumber": "0x1e910400",
             "removed": false
           }
         ]
@@ -438,6 +463,7 @@
             "data": "0x0000000000000000000000000000000000000000000000000000000002364643",
             "logIndex": "0x19",
             "transactionIndex": "0x6",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -448,6 +474,7 @@
             "data": "0x000000000000000000000000000000000000000000000000000000000000005c000000000000000000000000000000000000000000000000000000000000005c",
             "logIndex": "0x1a",
             "transactionIndex": "0x6",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -460,6 +487,7 @@
             "data": "0x000000000000000000000000000000000000000000000000000000000000aef0",
             "logIndex": "0x1b",
             "transactionIndex": "0x6",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -472,6 +500,7 @@
             "data": "0x00000000000000000000000000000000000000000000000000335891e3ba7255",
             "logIndex": "0x1c",
             "transactionIndex": "0x6",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -484,6 +513,7 @@
             "data": "0x0000000000000000000000000000000000000000000000000000000002363787",
             "logIndex": "0x1d",
             "transactionIndex": "0x6",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -496,6 +526,7 @@
             "data": "0xffffffffffffffffffffffffffffffffffffffffffffffffffcca76e1c458dab000000000000000000000000000000000000000000000000000000000236378700000000000000000000000000000000000000000003521a9a0b44b7a3dcd8b200000000000000000000000000000000000000000000000000244f1d1045048cfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffcfb4a",
             "logIndex": "0x1e",
             "transactionIndex": "0x6",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -508,6 +539,7 @@
             "data": "0x0000000000000000000000000000000000000000000000000000002e6fe82d14",
             "logIndex": "0x1f",
             "transactionIndex": "0x6",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -520,6 +552,7 @@
             "data": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff511000000000000000000000000000000000000000000000000000335891e3ba7255000000000000000000000000000000000008ab03cb5517b365d70d0f14209aaf00000000000000000000000000000000000000000000000000017a62662b11dc0000000000000000000000000000000000000000000000000000000000040b35",
             "logIndex": "0x20",
             "transactionIndex": "0x6",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -532,6 +565,7 @@
             "data": "0x000000000000000000000000000000000000000000000000000000000000aef0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffdc9b9bd000000000000000000000000000000000000001ccb49e42582a0535b032996230000000000000000000000000000000000000000000000000000024704495fd80000000000000000000000000000000000000000000000000000000000010686",
             "logIndex": "0x21",
             "transactionIndex": "0x6",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -544,6 +578,7 @@
             "data": "0x0000000000000000000000000000000000000000000000000000000000000ebc",
             "logIndex": "0x22",
             "transactionIndex": "0x6",
+            "blockNumber": "0x1e910400",
             "removed": false
           },
           {
@@ -554,6 +589,7 @@
             "data": "0x000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000ebc000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e583100000000000000000000000000000000000000000000000000000000000000030000000000000000000000006f38e884725a116c9c7fbf208e79fe8828a2595f000000000000000000000000d845f7d4f4deb9ff5bcf09d140ef13718f6f6c710000000000000000000000000e4831319a50228b9e450861297ab92dee15b44f0000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
             "logIndex": "0x23",
             "transactionIndex": "0x6",
+            "blockNumber": "0x1e910400",
             "removed": false
           }
         ]
@@ -562,7 +598,8 @@
   },
   "pools": [
     {
-      "address": "0x0e4831319a50228b9e450861297ab92dee15b44f",
+      "id": "0x0e4831319a50228b9e450861297ab92dee15b44f",
+      "contract": "0x0e4831319a50228b9e450861297ab92dee15b44f",
       "kind": "v3",
       "canonical": true,
       "venue": "uniswap-v3",
@@ -573,7 +610,8 @@
       "first_seen": 512820224
     },
     {
-      "address": "0x6f38e884725a116c9c7fbf208e79fe8828a2595f",
+      "id": "0x6f38e884725a116c9c7fbf208e79fe8828a2595f",
+      "contract": "0x6f38e884725a116c9c7fbf208e79fe8828a2595f",
       "kind": "v3",
       "canonical": true,
       "venue": "uniswap-v3",
@@ -584,7 +622,8 @@
       "first_seen": 512820224
     },
     {
-      "address": "0xc6962004f452be9203591991d15f6b388e09e8d0",
+      "id": "0xc6962004f452be9203591991d15f6b388e09e8d0",
+      "contract": "0xc6962004f452be9203591991d15f6b388e09e8d0",
       "kind": "v3",
       "canonical": true,
       "venue": "uniswap-v3",
@@ -595,15 +634,42 @@
       "first_seen": 512820224
     },
     {
-      "address": "0xd845f7d4f4deb9ff5bcf09d140ef13718f6f6c71",
+      "id": "0xd845f7d4f4deb9ff5bcf09d140ef13718f6f6c71",
+      "contract": "0xd845f7d4f4deb9ff5bcf09d140ef13718f6f6c71",
       "kind": "v3",
       "canonical": false,
       "factory": "0x0000000000000000000000000000000000000000",
       "token0": "0x0000000000000000000000000000000000000000",
       "token1": "0x0000000000000000000000000000000000000000",
       "first_seen": 512820224
+    },
+    {
+      "id": "0x015537a47e3865bd59fa4b0feed5546f1b5d27660447dddcdf86808bce384d98",
+      "contract": "0x360e68faccca8ca495c1b759fd9eee466db9fb32",
+      "kind": "v4",
+      "canonical": true,
+      "venue": "uniswap-v4",
+      "factory": "0x360e68faccca8ca495c1b759fd9eee466db9fb32",
+      "token0": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "token1": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      "fee_pips": 8388608,
+      "hooks": "0xd73339564ac99f3e09b0ebc80603ff8b796500c0",
+      "native": true,
+      "first_seen": 343248706
+    },
+    {
+      "id": "0xfc7b3ad139daaf1e9c3637ed921c154d1b04286f8a82b805a6c352da57028653",
+      "contract": "0x360e68faccca8ca495c1b759fd9eee466db9fb32",
+      "kind": "v4",
+      "canonical": true,
+      "venue": "uniswap-v4",
+      "factory": "0x360e68faccca8ca495c1b759fd9eee466db9fb32",
+      "token0": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "token1": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      "fee_pips": 500,
+      "first_seen": 298135171
     }
   ],
   "ref_pool": "0xc6962004f452be9203591991d15f6b388e09e8d0",
-  "ref_sqrt_price_x96": "4015430287879154529746983"
+  "ref_sqrt_price_x96": "4004704705228643994729262"
 }

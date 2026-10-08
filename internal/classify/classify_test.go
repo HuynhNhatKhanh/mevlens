@@ -27,24 +27,26 @@ var (
 	user = addr(0xe1)
 )
 
+func id(a eth.Address) dex.PoolID { return dex.PoolIDFromAddress(a) }
+
 func addr(b byte) eth.Address {
 	var a eth.Address
 	a[19] = b
 	return a
 }
 
-type pools map[eth.Address]dex.Pool
+type pools map[dex.PoolID]dex.Pool
 
-func (p pools) Lookup(a eth.Address) (dex.Pool, bool) { v, ok := p[a]; return v, ok }
+func (p pools) Lookup(id dex.PoolID) (dex.Pool, bool) { v, ok := p[id]; return v, ok }
 
 func testPools() pools {
 	// token0 < token1 by address: WETH(0x82) < ARB(0x91) < USDC(0xaf)
 	return pools{
-		poolA:    {Address: poolA, Kind: dex.KindV2, Canonical: true, Venue: "sushi-v2", Token0: weth, Token1: usdc},
-		poolB:    {Address: poolB, Kind: dex.KindV3, Canonical: true, Venue: "uniswap-v3", Token0: weth, Token1: usdc, FeePips: 500},
-		poolC:    {Address: poolC, Kind: dex.KindV2, Canonical: true, Venue: "camelot-v2", Token0: arb, Token1: usdc},
-		poolD:    {Address: poolD, Kind: dex.KindV2, Canonical: true, Venue: "uniswap-v2", Token0: weth, Token1: arb},
-		fakePool: {Address: fakePool, Kind: dex.KindV2, Canonical: false},
+		id(poolA):    {ID: id(poolA), Contract: poolA, Kind: dex.KindV2, Canonical: true, Venue: "sushi-v2", Token0: weth, Token1: usdc},
+		id(poolB):    {ID: id(poolB), Contract: poolB, Kind: dex.KindV3, Canonical: true, Venue: "uniswap-v3", Token0: weth, Token1: usdc, FeePips: 500},
+		id(poolC):    {ID: id(poolC), Contract: poolC, Kind: dex.KindV2, Canonical: true, Venue: "camelot-v2", Token0: arb, Token1: usdc},
+		id(poolD):    {ID: id(poolD), Contract: poolD, Kind: dex.KindV2, Canonical: true, Venue: "uniswap-v2", Token0: weth, Token1: arb},
+		id(fakePool): {ID: id(fakePool), Contract: fakePool, Kind: dex.KindV2, Canonical: false},
 	}
 }
 
@@ -123,7 +125,7 @@ func TestTwoPoolArbitrage(t *testing.T) {
 	if a.PriorityFeePerGas != 20_000_000 || a.CostETH != 300_000*30_000_000/1e18 {
 		t.Fatalf("fees: prio=%d cost=%v", a.PriorityFeePerGas, a.CostETH)
 	}
-	if !reflect.DeepEqual(a.Pools, []eth.Address{poolA, poolB}) {
+	if !reflect.DeepEqual(a.Pools, []dex.PoolID{id(poolA), id(poolB)}) || !reflect.DeepEqual(a.Contracts, []eth.Address{poolA, poolB}) {
 		t.Fatalf("pools = %v", a.Pools)
 	}
 	if len(res.Swaps) != 2 || res.Swaps[0].TokenIn != weth || res.Swaps[1].TokenOut != weth || res.Swaps[1].Venue != "uniswap-v3" {
@@ -213,7 +215,7 @@ func TestCandidates(t *testing.T) {
 		eth.Log{Address: addr(0x98), Topics: []eth.Hash{dex.TopicV2Sync}},
 	))
 	got := New(testPools(), newOracle(t)).Candidates(b)
-	want := []dex.Candidate{{Address: unknown, Kind: dex.KindV3}}
+	want := []dex.Candidate{{ID: id(unknown), Contract: unknown, Kind: dex.KindV3}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("candidates = %+v", got)
 	}
@@ -295,5 +297,70 @@ func TestPartiallyValuedProfitIsUnvalued(t *testing.T) {
 	}
 	if a := res.Arbs[0]; a.ProfitTokens != 2 || a.Valued || a.ProfitETH != 0 {
 		t.Fatalf("arb = %+v", a)
+	}
+}
+
+var (
+	manager = addr(0x44)
+	v4Pool  = dex.PoolID(eth.Hash{0x3e, 0x0d})
+)
+
+// v4Swap takes signed swapper deltas: positive = received by the swapper.
+func v4Swap(emitter eth.Address, pool dex.PoolID, amount0, amount1 *uint256.Int) eth.Log {
+	data := append(append([]byte{}, word(amount0)...), word(amount1)...)
+	data = append(data, make([]byte, 4*32)...)
+	return eth.Log{Address: emitter, Topics: []eth.Hash{dex.TopicV4Swap, eth.Hash(pool), {}}, Data: data}
+}
+
+func poolsWithV4() pools {
+	p := testPools()
+	// Native ETH / token pool; the registry aliases native ETH to WETH.
+	p[v4Pool] = dex.Pool{ID: v4Pool, Contract: manager, Kind: dex.KindV4, Canonical: true, Venue: "uniswap-v4",
+		Token0: weth, Token1: usdc, Native: true, FeePips: 3000}
+	return p
+}
+
+func TestArbitrageAcrossV3AndV4WithNativeETH(t *testing.T) {
+	// Mirrors mainnet tx 0x3b30…: buy native ETH with USDC on v4, sell WETH for
+	// USDC on v3. Only the ETH≡WETH alias makes the legs cancel out.
+	r := receipt(0, eoa, bot, 1,
+		v4Swap(manager, v4Pool, u(1e18), neg(3000e6)),  // swapper pays 3000 USDC, receives 1 ETH
+		v3Swap(poolB, u(1e18), neg(3005e6), sqrtP3000), // pool takes 1 WETH, pays 3005 USDC
+	)
+	res := New(poolsWithV4(), newOracle(t)).Classify(block(r))
+	if len(res.Arbs) != 1 {
+		t.Fatalf("arbs = %d, want 1", len(res.Arbs))
+	}
+	a := res.Arbs[0]
+	if a.ProfitToken != usdc || a.Profit.Uint64() != 5e6 || a.ProfitTokens != 1 {
+		t.Fatalf("arb = %+v (profit %s)", a, a.Profit.Dec())
+	}
+	if !reflect.DeepEqual(a.Pools, []dex.PoolID{v4Pool, id(poolB)}) || !reflect.DeepEqual(a.Contracts, []eth.Address{manager, poolB}) {
+		t.Fatalf("pools = %v contracts = %v", a.Pools, a.Contracts)
+	}
+}
+
+func TestV4SwapFromWrongEmitterIsIgnored(t *testing.T) {
+	// Same pool id, but emitted by a contract that is not the pool's PoolManager.
+	r := receipt(0, eoa, bot, 1,
+		v4Swap(addr(0x66), v4Pool, u(1e18), neg(3000e6)),
+		v3Swap(poolB, u(1e18), neg(3005e6), sqrtP3000),
+	)
+	res := New(poolsWithV4(), newOracle(t)).Classify(block(r))
+	if len(res.Arbs) != 0 || res.Block.Swaps != 1 {
+		t.Fatalf("spoofed v4 swap was trusted: arbs=%d swaps=%d", len(res.Arbs), res.Block.Swaps)
+	}
+}
+
+func TestCandidatesIncludeV4InitializeAndSwaps(t *testing.T) {
+	newPool := dex.PoolID(eth.Hash{0x99})
+	initData := make([]byte, 5*32)
+	b := block(receipt(0, user, addr(0x77), 1,
+		eth.Log{Address: manager, Topics: []eth.Hash{dex.TopicV4Initialize, eth.Hash(newPool), {}, usdc.Word()}, Data: initData},
+		v4Swap(manager, newPool, u(1), neg(1)),
+	))
+	got := New(poolsWithV4(), newOracle(t)).Candidates(b)
+	if len(got) != 2 || got[0].Init == nil || got[0].ID != newPool || got[1].Kind != dex.KindV4 || got[1].ID != newPool {
+		t.Fatalf("candidates = %+v", got)
 	}
 }

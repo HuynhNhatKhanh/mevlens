@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/holiman/uint256"
 
@@ -48,9 +49,17 @@ func inspect(ctx context.Context, configPath string, n uint64, dumpDir string, s
 	if err != nil {
 		return err
 	}
-	reg, err := registry.New(client, cfg.Factories())
+	reg, err := registry.New(client, cfg.Factories(), cfg.Pricing.WETH)
 	if err != nil {
 		return err
+	}
+	// Without a database the v4 pool index is rebuilt from scratch (one eth_getLogs
+	// per 10M blocks, ~30s on public endpoints). follow/backfill persist it instead.
+	if len(reg.Managers()) > 0 {
+		fmt.Fprintln(stderr, "indexing Uniswap v4 pools up to block", n, "(no database: this takes ~30s)...")
+		if err := reg.SyncV4(ctx, n, nil); err != nil {
+			return err
+		}
 	}
 	oracle, seed, err := newOracle(ctx, cfg, client, log)
 	if err != nil {
@@ -63,7 +72,7 @@ func inspect(ctx context.Context, configPath string, n uint64, dumpDir string, s
 	res := cl.Classify(b)
 
 	if dumpDir != "" {
-		if err := dumpFixture(dumpDir, cfg.Chain.Name, b, reg.DrainNew(), oracle.RefPool(), seed, stderr); err != nil {
+		if err := dumpFixture(dumpDir, cfg.Chain.Name, b, referencedPools(reg, b), oracle.RefPool(), seed, stderr); err != nil {
 			return err
 		}
 	}
@@ -84,6 +93,39 @@ func dumpFixture(dir, chain string, b *eth.Block, pools []dex.Pool, ref eth.Addr
 	}
 	fmt.Fprintln(stderr, "fixture written to", path)
 	return nil
+}
+
+// referencedPools returns the resolved pools that b's swap and Initialize logs
+// refer to, so a fixture stays small and self-contained.
+func referencedPools(reg *registry.Registry, b *eth.Block) []dex.Pool {
+	seen := map[dex.PoolID]bool{}
+	var out []dex.Pool
+	for i := range b.Receipts {
+		for j := range b.Receipts[i].Logs {
+			l := &b.Receipts[i].Logs[j]
+			if len(l.Topics) < 2 {
+				continue
+			}
+			var id dex.PoolID
+			switch dex.KindOfTopic(l.Topics[0]) {
+			case dex.KindV2, dex.KindV3:
+				id = dex.PoolIDFromAddress(l.Address)
+			case dex.KindV4:
+				id = dex.PoolID(l.Topics[1])
+			default:
+				if l.Topics[0] != dex.TopicV4Initialize {
+					continue
+				}
+				id = dex.PoolID(l.Topics[1])
+			}
+			if p, ok := reg.Lookup(id); ok && !seen[id] {
+				seen[id] = true
+				out = append(out, p)
+			}
+		}
+	}
+	slices.SortFunc(out, func(a, b dex.Pool) int { return eth.Hash(a.ID).Compare(eth.Hash(b.ID)) })
+	return out
 }
 
 type report struct {
@@ -126,7 +168,7 @@ func newReport(res *classify.Result) report {
 			CostETH: a.CostETH, PriorityGwei: float64(a.PriorityFeePerGas) / 1e9, GasUsed: a.GasUsed, Timeboosted: a.Timeboosted,
 		}
 		for _, p := range a.Pools {
-			ra.Pools = append(ra.Pools, p.Hex())
+			ra.Pools = append(ra.Pools, p.String())
 		}
 		if a.Status == classify.StatusSuccess {
 			ra.ProfitToken, ra.ProfitRaw, ra.ProfitTokens = a.ProfitToken.Hex(), a.Profit.Dec(), a.ProfitTokens

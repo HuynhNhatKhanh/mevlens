@@ -37,12 +37,13 @@ func (r *Receipt) Succeeded() bool { return r.Status == 1 }
 
 // Log is an EVM log entry.
 type Log struct {
-	Address  Address  `json:"address"`
-	Topics   []Hash   `json:"topics"`
-	Data     Data     `json:"data"`
-	LogIndex Quantity `json:"logIndex"`
-	TxIndex  Quantity `json:"transactionIndex"`
-	Removed  bool     `json:"removed"`
+	Address     Address  `json:"address"`
+	Topics      []Hash   `json:"topics"`
+	Data        Data     `json:"data"`
+	LogIndex    Quantity `json:"logIndex"`
+	TxIndex     Quantity `json:"transactionIndex"`
+	BlockNumber Quantity `json:"blockNumber"`
+	Removed     bool     `json:"removed"`
 }
 
 // Topic returns the i-th topic, or false if absent.
