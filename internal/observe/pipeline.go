@@ -94,6 +94,10 @@ type Config struct {
 	ReorgDepth     uint64        // blocks to rewind on reorg (default 64)
 	RetryBase      time.Duration // default 200ms
 	RetryMax       time.Duration // default 5s
+	// ResolveAttempts bounds the pool resolution retries of one block (default
+	// 10). Past it the block is processed with its unresolved pools skipped, so
+	// one contract the resolver keeps failing on cannot halt ingestion.
+	ResolveAttempts int
 }
 
 func (c *Config) setDefaults() {
@@ -120,6 +124,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.RetryMax <= 0 {
 		c.RetryMax = 5 * time.Second
+	}
+	if c.ResolveAttempts <= 0 {
+		c.ResolveAttempts = 10
 	}
 }
 
@@ -421,6 +428,10 @@ func (p *Pipeline) process(ctx context.Context, blocks <-chan *eth.Block, parent
 	}
 }
 
+// resolve resolves the block's pool candidates, retrying transient failures. When
+// the attempts run out, the block is processed anyway: unresolved pools are not
+// cached, so their swaps are skipped here and resolution is tried again the next
+// time they appear.
 func (p *Pipeline) resolve(ctx context.Context, n uint64, b *eth.Block) error {
 	cands := p.cl.Candidates(b)
 	for attempt := 0; ; attempt++ {
@@ -430,6 +441,10 @@ func (p *Pipeline) resolve(ctx context.Context, n uint64, b *eth.Block) error {
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if attempt+1 >= p.cfg.ResolveAttempts {
+			p.log.Error("pool resolution failed, skipping unresolved pools", "block", n, "attempts", attempt+1, "err", err)
+			return nil
 		}
 		p.log.Warn("pool resolution failed, retrying", "block", n, "attempt", attempt, "err", err)
 		if err := sleep(ctx, p.backoff(attempt)); err != nil {
