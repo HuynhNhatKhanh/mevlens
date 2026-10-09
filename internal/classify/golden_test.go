@@ -80,7 +80,8 @@ func classifyFixture(t *testing.T, fx *fixture.Fixture) classify.Result {
 		if err != nil {
 			t.Fatal(err)
 		}
-		o.SetSqrtPrice(seed, 0)
+		// inspect seeds from the parent's state, so the price is as of Number-1.
+		o.SetSqrtPrice(seed, uint64(fx.Block.Header.Number)-1)
 	}
 	return classify.New(fixture.NewLookup(fx.Pools), o).Classify(&fx.Block)
 }

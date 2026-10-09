@@ -72,7 +72,10 @@ type Pricing struct {
 	ReferenceFactory string      `toml:"reference_factory"`
 	ReferenceStable  eth.Address `toml:"reference_stable"`
 	ReferenceFee     uint32      `toml:"reference_fee"`
-	Stables          []Stable    `toml:"stables"`
+	// MaxPriceAgeBlocks bounds how long an ETH/USD observation values stablecoin
+	// profits (default pricing.DefaultMaxAgeBlocks, about one hour).
+	MaxPriceAgeBlocks uint64   `toml:"max_price_age_blocks"`
+	Stables           []Stable `toml:"stables"`
 }
 
 type Stable struct {
@@ -188,6 +191,9 @@ func (c *Config) setDefaults() {
 	if c.ClickHouse.Database == "" {
 		c.ClickHouse.Database = "mevlens"
 	}
+	if c.Pricing.MaxPriceAgeBlocks == 0 {
+		c.Pricing.MaxPriceAgeBlocks = pricing.DefaultMaxAgeBlocks
+	}
 }
 
 // Validate reports every problem at once.
@@ -287,7 +293,10 @@ func (c *Config) Factory(name string) (registry.Factory, bool) {
 // PricingConfig converts to the pricing package configuration. refPool is the
 // reference pool address resolved at startup (zero disables ETH/USD pricing).
 func (c *Config) PricingConfig(refPool eth.Address) pricing.Config {
-	out := pricing.Config{WETH: c.Pricing.WETH, RefPool: refPool, RefStable: c.Pricing.ReferenceStable}
+	out := pricing.Config{
+		WETH: c.Pricing.WETH, RefPool: refPool, RefStable: c.Pricing.ReferenceStable,
+		MaxAgeBlocks: c.Pricing.MaxPriceAgeBlocks,
+	}
 	for _, s := range c.Pricing.Stables {
 		out.Stables = append(out.Stables, pricing.Stable{Address: s.Address, Decimals: s.Decimals})
 	}

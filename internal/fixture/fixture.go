@@ -18,7 +18,7 @@ type Fixture struct {
 	Block     eth.Block   `json:"block"`
 	Pools     []dex.Pool  `json:"pools"`
 	RefPool   eth.Address `json:"ref_pool"`
-	SqrtPrice string      `json:"ref_sqrt_price_x96"` // decimal; seeds the ETH/USD oracle
+	SqrtPrice string      `json:"ref_sqrt_price_x96"` // decimal slot0 as of Block-1; seeds the ETH/USD oracle
 }
 
 // Load reads a fixture file.

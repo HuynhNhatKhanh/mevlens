@@ -14,6 +14,13 @@ produce the same output. Concurrency is still needed to fetch blocks fast enough
   `pure-core` depguard rule in `.golangci.yml` enforces this in CI.
 - Results never depend on map iteration order. Output follows block, transaction
   and log order.
+- Results never depend on when the process started. The ETH/USD oracle is
+  seeded from the reference pool's `slot0` in the state the first processed
+  block executes on (block `start-1`), never from `latest`, and an observation
+  values stablecoins only for `pricing.max_price_age_blocks` blocks (default
+  14,400, about one hour) at or after its block. If the endpoint has pruned the
+  seed state, the oracle starts unseeded: stablecoin profits stay unvalued until
+  the first reference swap rather than being valued at another day's price.
 - **Dependency rule** (ports & adapters): domain types (`dex.Pool`,
   `dex.Candidate`, `eth.*`) live in the core. The pipeline (`observe`) talks to
   infrastructure only through interfaces it owns (`BlockSource`, `Resolver`,

@@ -94,18 +94,25 @@ func newApp(ctx context.Context, configPath, listen string, stderr io.Writer) (*
 	if err := a.syncV4Index(ctx); err != nil {
 		return nil, err
 	}
+	return a, nil
+}
+
+// newClassifier builds the classifier once the first block to process is known:
+// the oracle is seeded from the state that block executes on, so the valuations
+// of a replayed range do not depend on when the process started.
+func (a *app) newClassifier(ctx context.Context, start uint64) error {
 	bots, err := a.store.LoadBots(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	oracle, _, err := newOracle(ctx, cfg, a.client, log)
+	oracle, _, err := newOracle(ctx, a.cfg, a.client, start, a.log)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	a.cl = classify.New(a.reg, oracle, classify.WithRegime(cfg.RegimeFunc()), classify.WithKnownBots(bots))
+	a.cl = classify.New(a.reg, oracle, classify.WithRegime(a.cfg.RegimeFunc()), classify.WithKnownBots(bots))
 	total, canonical := a.reg.Len()
-	log.Info("state loaded", "pools", total, "canonical_pools", canonical, "known_bots", len(bots))
-	return a, nil
+	a.log.Info("state loaded", "pools", total, "canonical_pools", canonical, "known_bots", len(bots))
+	return nil
 }
 
 // syncV4Index indexes Uniswap v4 pools initialized up to the current head, so the
@@ -203,6 +210,9 @@ func follow(ctx context.Context, configPath string, from uint64, listen string, 
 			return err
 		}
 	}
+	if err := a.newClassifier(ctx, start); err != nil {
+		return err
+	}
 	a.log.Info("following chain", "start", start, "parent_check", parent != nil)
 	p := observe.New(a.cfg.PipelineConfig(checkpoint), rpcSource{a.client}, a.reg, a.cl, a.store, a.metrics, a.log)
 	return a.serve(ctx, func(ctx context.Context) error { return p.Follow(ctx, start, parent) })
@@ -223,6 +233,9 @@ func backfill(ctx context.Context, configPath string, from, to uint64, listen st
 	if start > to {
 		a.log.Info("backfill already complete", "from", from, "to", to)
 		return nil
+	}
+	if err := a.newClassifier(ctx, start); err != nil {
+		return err
 	}
 	a.log.Info("backfilling", "from", start, "to", to)
 	began := time.Now()
@@ -290,15 +303,26 @@ var (
 )
 
 // newOracle resolves the reference pool through its factory (no hard-coded pool
-// address) and seeds the ETH/USD price from slot0. It returns the seed price so
-// fixtures can reproduce the valuation offline.
-func newOracle(ctx context.Context, cfg *config.Config, c *rpc.Client, log *slog.Logger) (*pricing.Oracle, *uint256.Int, error) {
+// address) and seeds the ETH/USD price from slot0 in the state block start
+// executes on (that of block start-1), recorded at start-1. Seeding from
+// "latest" would value a replay of old blocks at today's price until the first
+// reference swap, making the output depend on when the process started. It
+// returns the seed price so fixtures can reproduce the valuation offline.
+//
+// When the endpoint has pruned that state, the oracle starts unseeded instead of
+// falling back to "latest" (unlike registry, whose pool immutables do not change
+// over time): stablecoin profits stay unvalued until the first reference swap,
+// a few blocks on the deepest WETH/USDC pool. An unvalued row shows up in the
+// valuation coverage; a row valued at another day's price would be silently wrong.
+func newOracle(ctx context.Context, cfg *config.Config, c *rpc.Client, start uint64, log *slog.Logger) (*pricing.Oracle, *uint256.Int, error) {
 	p := cfg.Pricing
 	if p.ReferenceFactory == "" {
 		o, err := pricing.New(cfg.PricingConfig(eth.Address{}))
 		return o, nil, err
 	}
 	f, _ := cfg.Factory(p.ReferenceFactory)
+	// The pool address is a CREATE2 function of its tokens and fee, the same at
+	// every height, so resolving it at "latest" keeps the output deterministic.
 	ret, err := c.CallContract(ctx, f.Address,
 		selGetPool.Calldata(p.WETH.Word(), p.ReferenceStable.Word(), eth.Uint64Word(uint64(p.ReferenceFee))), rpc.Latest)
 	if err != nil {
@@ -313,16 +337,21 @@ func newOracle(ctx context.Context, cfg *config.Config, c *rpc.Client, log *slog
 	if err != nil {
 		return nil, nil, err
 	}
-	ret, err = c.CallContract(ctx, ref, selSlot0.Calldata(), rpc.Latest)
+	at := start - min(start, 1) // the state block start executes on
+	ret, err = c.CallContract(ctx, ref, selSlot0.Calldata(), eth.FormatBlock(at))
+	if rpc.IsMissingState(err) {
+		log.Warn("pricing seed state pruned, ETH/USD unknown until a reference swap", "block", at, "err", err)
+		return o, nil, nil
+	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("reference pool slot0: %w", err)
+		return nil, nil, fmt.Errorf("reference pool slot0 at block %d: %w", at, err)
 	}
 	seed := new(uint256.Int)
 	if w, ok := eth.WordAt(ret, 0); ok {
 		seed.SetBytes32(w[:])
-		o.SetSqrtPrice(seed, 0)
+		o.SetSqrtPrice(seed, at)
 	}
-	price, _, known := o.ETHUSD()
-	log.Info("pricing ready", "reference_pool", ref, "eth_usd", price, "known", known)
+	price, block, known := o.ETHUSD()
+	log.Info("pricing ready", "reference_pool", ref, "eth_usd", price, "block", block, "known", known)
 	return o, seed, nil
 }

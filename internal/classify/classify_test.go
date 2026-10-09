@@ -300,6 +300,28 @@ func TestPartiallyValuedProfitIsUnvalued(t *testing.T) {
 	}
 }
 
+func TestStalePriceLeavesStablecoinProfitUnvalued(t *testing.T) {
+	// Same +5 USDC triangle as above, but the only ETH/USD price is older than
+	// MaxAgeBlocks at block 1000: the profit is reported unvalued, not misvalued.
+	r := receipt(0, eoa, bot, 1,
+		v2Swap(poolA, 0, 3000e6, 1e18, 0),
+		v2Swap(poolD, 1e18, 0, 0, 4000e18/1e9),
+		v2Swap(poolC, 4000e18/1e9, 0, 0, 3005e6),
+	)
+	o, err := pricing.New(pricing.Config{WETH: weth, Stables: []pricing.Stable{{Address: usdc, Decimals: 6}}, RefPool: poolB, RefStable: usdc, MaxAgeBlocks: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.SetSqrtPrice(sqrtP3000, 989)
+	res := New(testPools(), o).Classify(block(r))
+	if len(res.Arbs) != 1 {
+		t.Fatalf("arbs = %d", len(res.Arbs))
+	}
+	if a := res.Arbs[0]; a.ProfitToken != usdc || a.Valued || a.ProfitETH != 0 {
+		t.Fatalf("arb = %+v", a)
+	}
+}
+
 var (
 	manager = addr(0x44)
 	v4Pool  = dex.PoolID(eth.Hash{0x3e, 0x0d})

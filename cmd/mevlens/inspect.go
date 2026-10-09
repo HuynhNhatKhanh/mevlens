@@ -61,7 +61,7 @@ func inspect(ctx context.Context, configPath string, n uint64, dumpDir string, s
 			return err
 		}
 	}
-	oracle, seed, err := newOracle(ctx, cfg, client, log)
+	oracle, seed, err := newOracle(ctx, cfg, client, n, log)
 	if err != nil {
 		return err
 	}
