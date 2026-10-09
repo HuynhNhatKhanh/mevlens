@@ -16,7 +16,6 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -150,7 +149,6 @@ type Pipeline struct {
 	sink Sink
 	m    Metrics
 	log  *slog.Logger
-	head atomic.Uint64 // latest head seen in follow mode
 }
 
 // New builds a Pipeline. m and log may be nil.
@@ -230,7 +228,6 @@ func (p *Pipeline) followNumbers(start uint64) numberSource {
 				continue
 			}
 			attempt = 0
-			p.head.Store(head)
 			p.m.Head(head)
 			for ; next <= head; next++ {
 				select {
@@ -414,11 +411,7 @@ func (p *Pipeline) process(ctx context.Context, blocks <-chan *eth.Block, parent
 			batch.Checkpoint = Checkpoint{Name: p.cfg.CheckpointName, Block: n, Hash: b.Header.Hash}
 			lastHash, haveParent = b.Header.Hash, true
 
-			var lag uint64
-			if head := p.head.Load(); head > n {
-				lag = head - n
-			}
-			p.m.Processed(&res, lag)
+			p.m.Processed(&res)
 			if batch.Len() >= p.cfg.FlushBlocks {
 				if err := flush(ctx); err != nil {
 					return err

@@ -3,6 +3,7 @@
 package telemetry
 
 import (
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -20,8 +21,6 @@ type Metrics struct {
 
 	head          prometheus.Gauge
 	processed     prometheus.Gauge
-	lagBlocks     prometheus.Gauge
-	blockAge      prometheus.Gauge
 	blocks        prometheus.Counter
 	swaps         prometheus.Counter
 	arbs          *prometheus.CounterVec
@@ -40,6 +39,18 @@ type Metrics struct {
 	slowThreshold time.Duration
 	onSlow        func(reason string)
 	now           func() time.Time
+
+	// Head lag and block age are computed at scrape time from these rather than
+	// set per block: a pipeline stalled in fetching or resolution processes
+	// nothing, so gauges set in Processed would freeze at their last healthy
+	// values (lag 0, age under a second) and dashboards would stay green.
+	chainHead atomic.Uint64
+	last      atomic.Pointer[processedBlock] // nil until the first block
+}
+
+type processedBlock struct {
+	number uint64
+	time   time.Time
 }
 
 // NewMetrics registers all metrics. onSlow (optional) is invoked when a fetch or
@@ -54,8 +65,6 @@ func NewMetrics(slowThreshold time.Duration, onSlow func(reason string)) *Metric
 		Registry:      reg,
 		head:          f.gauge("chain_head_block", "Latest chain head observed in follow mode."),
 		processed:     f.gauge("processed_block", "Latest block processed by the pipeline."),
-		lagBlocks:     f.gauge("head_lag_blocks", "Blocks between the chain head and the last processed block."),
-		blockAge:      f.gauge("processed_block_age_seconds", "Wall-clock age of the last processed block."),
 		blocks:        f.counter("blocks_processed_total", "Blocks processed."),
 		swaps:         f.counter("swaps_total", "Swaps on canonical pools."),
 		arbs:          f.counterVec("arbitrages_total", "Arbitrage transactions observed.", "status", "regime"),
@@ -74,6 +83,8 @@ func NewMetrics(slowThreshold time.Duration, onSlow func(reason string)) *Metric
 		onSlow:        onSlow,
 		now:           time.Now,
 	}
+	f.gaugeFunc("head_lag_blocks", "Blocks between the chain head and the last processed block.", m.lagBlocks)
+	f.gaugeFunc("processed_block_age_seconds", "Wall-clock age of the last processed block.", m.blockAge)
 	m.arbsByRegime = make(map[classify.Regime][2]prometheus.Counter)
 	for _, r := range []classify.Regime{classify.RegimeUnknown, classify.RegimeFCFS, classify.RegimeTimeboost, classify.RegimePGA} {
 		m.arbsByRegime[r] = [2]prometheus.Counter{
@@ -85,7 +96,10 @@ func NewMetrics(slowThreshold time.Duration, onSlow func(reason string)) *Metric
 }
 
 // Head implements observe.Metrics.
-func (m *Metrics) Head(head uint64) { m.head.Set(float64(head)) }
+func (m *Metrics) Head(head uint64) {
+	m.chainHead.Store(head)
+	m.head.Set(float64(head))
+}
 
 // Fetched implements observe.Metrics.
 func (m *Metrics) Fetched(retries int, d time.Duration) {
@@ -95,16 +109,35 @@ func (m *Metrics) Fetched(retries int, d time.Duration) {
 }
 
 // Processed implements observe.Metrics.
-func (m *Metrics) Processed(res *classify.Result, lag uint64) {
+func (m *Metrics) Processed(res *classify.Result) {
 	b := &res.Block
+	m.last.Store(&processedBlock{number: b.Number, time: time.Unix(int64(b.Timestamp), 0)})
 	m.processed.Set(float64(b.Number))
-	m.lagBlocks.Set(float64(lag))
-	m.blockAge.Set(m.now().Sub(time.Unix(int64(b.Timestamp), 0)).Seconds())
 	m.blocks.Inc()
 	m.swaps.Add(float64(b.Swaps))
 	c := m.arbsByRegime[b.Regime]
 	c[0].Add(float64(b.Arbs))
 	c[1].Add(float64(b.RevertedArbs))
+}
+
+// lagBlocks is 0 until both the head and a processed block are known: backfill
+// never polls the head, and before the first block there is nothing to lag.
+func (m *Metrics) lagBlocks() float64 {
+	head, last := m.chainHead.Load(), m.last.Load()
+	if last == nil || head <= last.number {
+		return 0
+	}
+	return float64(head - last.number)
+}
+
+// blockAge keeps growing while no block is processed, which is what exposes a
+// stall. It is 0 before the first block.
+func (m *Metrics) blockAge() float64 {
+	last := m.last.Load()
+	if last == nil {
+		return 0
+	}
+	return m.now().Sub(last.time).Seconds()
 }
 
 // Flushed implements observe.Metrics.
@@ -153,6 +186,10 @@ func (f factory) gauge(name, help string) prometheus.Gauge {
 	g := prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: name, Help: help})
 	f.reg.MustRegister(g)
 	return g
+}
+
+func (f factory) gaugeFunc(name, help string, fn func() float64) {
+	f.reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{Namespace: ns, Name: name, Help: help}, fn))
 }
 
 func (f factory) counter(name, help string) prometheus.Counter {
