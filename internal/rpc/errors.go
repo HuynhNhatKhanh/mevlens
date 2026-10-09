@@ -24,6 +24,11 @@ var (
 	// ErrUnsupported is returned when no configured endpoint supports a method.
 	ErrUnsupported = errors.New("rpc: no endpoint supports method")
 
+	// ErrEndpoints wraps an endpoint-level failure (an HTTP error status, a
+	// malformed or oversized body, ...) that persisted through every attempt. It
+	// says nothing about the request itself, so it is retryable.
+	ErrEndpoints = errors.New("rpc: endpoints failing")
+
 	errMissingResponse = errors.New("rpc: response missing for request id")
 )
 
@@ -74,6 +79,9 @@ func IsRetryable(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	if errors.Is(err, ErrEndpoints) {
+		return true
+	}
 	if errors.Is(err, ErrInconsistent) || errors.Is(err, errMissingResponse) {
 		return true
 	}
@@ -92,10 +100,7 @@ func IsRetryable(err error) bool {
 		if IsUnknownBlock(err) {
 			return true
 		}
-		switch re.Code {
-		case -32005, // limit exceeded (EIP-1474)
-			-32603, // internal error (often a transient backend failure)
-			429:    // some providers reuse the HTTP status as the code
+		if transientCode(re.Code) {
 			return true
 		}
 		msg := strings.ToLower(re.Message)
@@ -117,15 +122,29 @@ func IsUnsupported(err error) bool {
 	if re.Code == -32601 { // method not found
 		return true
 	}
-	// A revert reason is chosen by the contract ("function not supported") and
-	// pruned state ("historical state ... is not available") concerns one height,
-	// not the method: neither says anything about what the endpoint offers.
-	if IsExecutionError(err) || IsMissingState(err) || IsUnknownBlock(err) {
+	// A revert reason is chosen by the contract ("function not supported"), pruned
+	// state ("historical state ... is not available") concerns one height, and an
+	// overloaded backend ("upstream service not available") one moment: none says
+	// anything about what the endpoint offers.
+	if transientCode(re.Code) || IsExecutionError(err) || IsMissingState(err) || IsUnknownBlock(err) {
 		return false
 	}
+	// Otherwise only a message about the method itself counts, e.g. "the method
+	// eth_getLogs is not available" or "eth_call is not supported".
 	msg := strings.ToLower(re.Message)
-	return strings.Contains(msg, "not supported") || strings.Contains(msg, "not available") ||
-		strings.Contains(msg, "not whitelisted") || strings.Contains(msg, "method not found")
+	return containsAny(msg, "method", "eth_", "arb_", "debug_") &&
+		containsAny(msg, "not supported", "unsupported", "not available", "not whitelisted", "not found", "does not exist")
+}
+
+// transientCode reports JSON-RPC error codes that mean "busy, try again".
+func transientCode(code int) bool {
+	switch code {
+	case -32005, // limit exceeded (EIP-1474)
+		-32603, // internal error (often a transient backend failure)
+		429:    // some providers reuse the HTTP status as the code
+		return true
+	}
+	return false
 }
 
 // IsLogRangeError reports whether an eth_getLogs request was refused because its
@@ -138,8 +157,9 @@ func IsLogRangeError(err error) bool {
 	// Phrasings seen from providers: Arbitrum ("query spans N blocks"), dRPC
 	// ("ranges over N blocks are not supported"), Alchemy ("block range",
 	// "response size exceeded"), Infura ("returned more than 10000 results").
-	// Deliberately not "limit exceeded": that is the -32005 rate-limit message.
-	for _, hint := range []string{"query spans", "ranges over", "block range", "range too large", "more than", "response size", "too many results", "too many logs"} {
+	// Deliberately not "limit exceeded" (the -32005 rate-limit message) nor a bare
+	// "more than" (rate limits say "more than N requests per second").
+	for _, hint := range []string{"query spans", "ranges over", "block range", "range too large", "returned more than", "response size", "too many results", "too many logs"} {
 		if strings.Contains(msg, hint) {
 			return true
 		}

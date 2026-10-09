@@ -256,21 +256,28 @@ func (c *Client) roundTrip(ctx context.Context, ep *endpoint, reqs []Request, pe
 		for _, i := range pending {
 			reqs[i].Err = err
 		}
+		m, single := singleMethod(reqs, pending)
 		switch {
-		case tooWide(method, err):
+		case single && tooWide(m, err):
 			return pending, outcomeSkip
-		case methodRefused(err):
+		case single && methodRefused(err):
 			// e.g. a free endpoint answering eth_getLogs with HTTP 403. Learn it
 			// (for a while) and fail over, but only when the refusal can be pinned
 			// on one method: a 403 to a mixed batch says nothing about which one.
-			if m, ok := singleMethod(reqs, pending); ok {
-				ep.markUnsupported(m, refusedTTL)
-				return pending, outcomeFailover
-			}
+			ep.markUnsupported(m, refusedTTL)
+			return pending, outcomeFailover
 		}
 		// Everything else (rate limits, auth or routing errors, malformed or
 		// oversized bodies) is a fault of this endpoint, not of the requests:
-		// back off and try another endpoint.
+		// back off and try another endpoint. Should it persist everywhere, the
+		// caller sees a retryable ErrEndpoints. A JSON-RPC error object answering
+		// the whole batch keeps its own classification.
+		var re *Error
+		if !errors.As(err, &re) {
+			for _, i := range pending {
+				reqs[i].Err = fmt.Errorf("%w: %w", ErrEndpoints, err)
+			}
+		}
 		return pending, outcomeTransient
 	}
 	var transient, skipped, missing bool
@@ -314,8 +321,13 @@ func (c *Client) roundTrip(ctx context.Context, ep *endpoint, reqs []Request, pe
 }
 
 // tooWide reports an eth_getLogs request refused for its block span or result size.
+// A rate limit or server error is never a refusal, whatever its body says.
 func tooWide(method string, err error) bool {
-	return (method == "eth_getLogs" || method == "batch") && IsLogRangeError(err)
+	var he *HTTPError
+	if errors.As(err, &he) && (he.Status == http.StatusTooManyRequests || he.Status >= 500) {
+		return false
+	}
+	return method == "eth_getLogs" && IsLogRangeError(err)
 }
 
 type wireRequest struct {
@@ -378,7 +390,9 @@ func (c *Client) send(ctx context.Context, ep *endpoint, reqs []Request, pending
 		return nil, &TransportError{Endpoint: ep.name, Err: err}
 	}
 	if int64(len(raw)) > c.cfg.MaxBodySize {
-		return nil, fmt.Errorf("rpc: response from %s exceeds %d bytes", ep.name, c.cfg.MaxBodySize)
+		// "response size" makes an oversized eth_getLogs answer a range error the
+		// caller can narrow.
+		return nil, fmt.Errorf("rpc: response size from %s exceeds %d bytes", ep.name, c.cfg.MaxBodySize)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, &HTTPError{Endpoint: ep.name, Status: resp.StatusCode, Body: snippet(raw)}

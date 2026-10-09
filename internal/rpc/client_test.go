@@ -589,3 +589,95 @@ func TestUnknownBlockFailsOverPerCall(t *testing.T) {
 		t.Fatal("lagging endpoint was blacklisted for the method")
 	}
 }
+
+func TestUnsupportedNeedsAMethodMessage(t *testing.T) {
+	for _, e := range []*Error{
+		{Code: -32603, Message: "upstream service not available"},
+		{Code: -32005, Message: "capacity not available, try later"},
+		{Code: -32000, Message: "receipts not available for block 0x10"},
+		{Code: 35, Message: "ranges over 10000 blocks are not supported on free plan"},
+	} {
+		if IsUnsupported(e) {
+			t.Errorf("IsUnsupported(%d %q) = true: says nothing about the method", e.Code, e.Message)
+		}
+	}
+	for _, e := range []*Error{
+		{Code: -32601, Message: "whatever"},
+		{Code: -32000, Message: "The method eth_call is not supported."},
+		{Code: -32000, Message: "the method eth_getLogs is not available on the free tier"},
+		{Code: -32000, Message: "Unsupported method: eth_getBlockReceipts"},
+		{Code: -32000, Message: "method not whitelisted"},
+	} {
+		if !IsUnsupported(e) {
+			t.Errorf("IsUnsupported(%d %q) = false", e.Code, e.Message)
+		}
+	}
+}
+
+func TestRateLimitIsNotARangeError(t *testing.T) {
+	if IsLogRangeError(&Error{Code: -32000, Message: "you sent more than 10 requests per second"}) {
+		t.Error("a rate limit worded \"more than\" is not a range refusal")
+	}
+	if !IsLogRangeError(&Error{Code: -32005, Message: "query returned more than 10000 results"}) {
+		t.Error("Infura's result cap is a range refusal")
+	}
+	if tooWide("eth_getLogs", &HTTPError{Status: http.StatusTooManyRequests, Body: "block range limit"}) {
+		t.Error("an HTTP 429 is never a range refusal")
+	}
+	if tooWide("eth_getBlockByNumber", &Error{Message: "block range too large"}) {
+		t.Error("only eth_getLogs can be too wide")
+	}
+
+	// End to end: a 429 to eth_getLogs backs off and retries instead of being
+	// reported at once as a range the caller should narrow.
+	node := &fakeNode{t: t,
+		status: func(round int) int {
+			if round == 0 {
+				return http.StatusTooManyRequests
+			}
+			return http.StatusOK
+		},
+		handle: func(int, rpcReq) (string, *Error) { return `[]`, nil },
+	}
+	srv := httptest.NewServer(node)
+	defer srv.Close()
+	if _, err := newClient(t, srv.URL).Logs(context.Background(), LogQuery{From: 1, To: 2}); err != nil {
+		t.Fatalf("Logs after a 429 = %v, want a retry", err)
+	}
+}
+
+func TestExhaustedEndpointFailureIsRetryable(t *testing.T) {
+	// Regression: roundTrip retried HTTP 4xx and malformed bodies as endpoint
+	// faults, but once attempts ran out the caller got an error IsRetryable
+	// called permanent, and the pipeline stopped after three of them.
+	html := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("<html>challenge</html>"))
+	}))
+	defer html.Close()
+	err := newClient(t, html.URL).Call(context.Background(), nil, "eth_blockNumber")
+	if err == nil || !IsRetryable(err) || !errors.Is(err, ErrEndpoints) {
+		t.Fatalf("err = %v, want a retryable ErrEndpoints", err)
+	}
+
+	unauthorized := &fakeNode{t: t, status: func(int) int { return http.StatusUnauthorized },
+		handle: func(int, rpcReq) (string, *Error) { return `"never"`, nil }}
+	srv := httptest.NewServer(unauthorized)
+	defer srv.Close()
+	err = newClient(t, srv.URL).Call(context.Background(), nil, "eth_blockNumber")
+	var he *HTTPError
+	if !IsRetryable(err) || !errors.As(err, &he) || he.Status != http.StatusUnauthorized {
+		t.Fatalf("err = %v, want a retryable error still carrying the HTTP 401", err)
+	}
+}
+
+func TestOversizedLogsResponseIsARangeError(t *testing.T) {
+	node := &fakeNode{t: t, handle: func(int, rpcReq) (string, *Error) {
+		return `[` + strings.Repeat(`"0x00",`, 100) + `"0x00"]`, nil
+	}}
+	srv := httptest.NewServer(node)
+	defer srv.Close()
+	c, _ := New(Config{Endpoints: []EndpointConfig{{URL: srv.URL}}, MaxBodySize: 64})
+	if _, err := c.Logs(context.Background(), LogQuery{From: 1, To: 2}); !IsLogRangeError(err) {
+		t.Fatalf("err = %v, want a range error the caller can narrow", err)
+	}
+}
