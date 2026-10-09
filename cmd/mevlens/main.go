@@ -24,6 +24,15 @@ import (
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// The first signal cancels ctx and starts a graceful shutdown: the final flush
+	// (up to 30s) or a reorg rewind (up to 2 min) still runs. Restore the default
+	// handling right away so that a second Ctrl-C kills the process instead of
+	// being swallowed. That is safe: an interrupted flush leaves the checkpoint
+	// behind and is re-ingested, an interrupted rewind is completed on resume.
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
 	err := run(ctx, os.Args[1:], os.Stdout, os.Stderr)
 	stop()
 	if err != nil && !errors.Is(err, context.Canceled) {

@@ -83,6 +83,10 @@ services:
       clickhouse:
         condition: service_healthy
     restart: unless-stopped
+    # SIGTERM starts a final flush bounded at 30s (observe.Pipeline), next to the
+    # admin server's 5s shutdown; compose's default 10s would SIGKILL it midway.
+    # (An interrupted reorg rewind, bounded at 2 min, is completed on restart.)
+    stop_grace_period: 45s
 
 volumes:
   clickhouse-data:

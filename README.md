@@ -69,7 +69,7 @@ make inspect
 export CLICKHOUSE_PASSWORD='choose-one' GRAFANA_ADMIN_PASSWORD='choose-one'
 export CLICKHOUSE_GRAFANA_PASSWORD='choose-one'  # Grafana's read-only ClickHouse user
 make up
-make follow            # ingest new blocks; Ctrl-C flushes and checkpoints
+make follow            # ingest new blocks; Ctrl-C flushes and checkpoints (twice: exit now)
 open http://localhost:3000   # dashboard: MEVLens → Arbitrum Arbitrage Observatory
 
 # Historical range (resumable: re-running continues from its checkpoint)
