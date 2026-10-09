@@ -201,6 +201,17 @@ func (c *Client) batchWithRetry(ctx context.Context, reqs []Request) error {
 	// wide for them, or a block they lack (lagging) or have pruned the state of.
 	// Other endpoints may serve it, so only this call skips them.
 	var skip map[*endpoint]bool
+	// The last per-call refusal of each request. When the endpoints left then fail
+	// for unrelated reasons (a rate limit, a batch cap), the refusal is what the
+	// caller can act on: narrow a log range, or read pruned state at "latest".
+	var refusals map[int]error
+	preferRefusals := func() {
+		for _, i := range pending {
+			if e, ok := refusals[i]; ok && !refusal(reqs[i].Method, reqs[i].Err) {
+				reqs[i].Err = e
+			}
+		}
+	}
 	for attempt := 0; ; {
 		ep := c.pickEndpoint(reqs, pending, skip)
 		if ep == nil {
@@ -209,6 +220,7 @@ func (c *Client) batchWithRetry(ctx context.Context, reqs []Request) error {
 					reqs[i].Err = fmt.Errorf("%w: %s", ErrUnsupported, reqs[i].Method)
 				}
 			}
+			preferRefusals()
 			return nil // with skip, reqs[i].Err holds the refusal (e.g. the caller narrows a log range)
 		}
 		failed, kind := c.roundTrip(ctx, ep, reqs, pending)
@@ -220,6 +232,14 @@ func (c *Client) batchWithRetry(ctx context.Context, reqs []Request) error {
 			return nil
 		}
 		pending = failed
+		for _, i := range failed {
+			if refusal(reqs[i].Method, reqs[i].Err) {
+				if refusals == nil {
+					refusals = make(map[int]error)
+				}
+				refusals[i] = reqs[i].Err
+			}
+		}
 		switch kind {
 		case outcomeFailover:
 			continue
@@ -232,7 +252,8 @@ func (c *Client) batchWithRetry(ctx context.Context, reqs []Request) error {
 		}
 		ep.markFailure(c.backoff(ep.failureCount()))
 		if attempt++; attempt >= c.cfg.MaxAttempts {
-			return nil // reqs[i].Err already holds the last retryable error
+			preferRefusals()
+			return nil // reqs[i].Err holds the last retryable error, or a refusal
 		}
 		if err := sleep(ctx, c.backoff(attempt-1)); err != nil {
 			return err
@@ -298,7 +319,7 @@ func (c *Client) roundTrip(ctx context.Context, ep *endpoint, reqs []Request, pe
 		}
 		switch e := reqs[i].Err; {
 		case e == nil, IsExecutionError(e): // a revert is the contract's final answer
-		case tooWide(reqs[i].Method, e), IsUnknownBlock(e), IsMissingState(e):
+		case refusal(reqs[i].Method, e):
 			failed, skipped = append(failed, i), true
 		case IsUnsupported(e):
 			ep.markUnsupported(reqs[i].Method, unsupportedTTL)
@@ -318,6 +339,12 @@ func (c *Client) roundTrip(ctx context.Context, ep *endpoint, reqs []Request, pe
 		return failed, outcomeFailover
 	}
 	return failed, outcomeDone
+}
+
+// refusal reports an error meaning "this endpoint cannot serve this request" (a
+// log range too wide, a block it lacks or has pruned) where another may.
+func refusal(method string, err error) bool {
+	return tooWide(method, err) || IsUnknownBlock(err) || IsMissingState(err)
 }
 
 // tooWide reports an eth_getLogs request refused for its block span or result size.

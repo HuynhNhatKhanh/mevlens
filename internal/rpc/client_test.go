@@ -681,3 +681,27 @@ func TestOversizedLogsResponseIsARangeError(t *testing.T) {
 		t.Fatalf("err = %v, want a range error the caller can narrow", err)
 	}
 }
+
+func TestRefusalSurvivesOtherEndpointsFailing(t *testing.T) {
+	// Found on mainnet: the full nodes answered "historical state ... is not
+	// available", the endpoint left kept failing the batch (HTTP 500, a free-plan
+	// batch cap), and the caller got the 500 instead of the pruned-state answer
+	// it falls back on, so a backfill of old blocks resolved no pool at all.
+	pruned := &fakeNode{t: t, handle: func(int, rpcReq) (string, *Error) {
+		return "", &Error{Code: -32000, Message: "historical state 4c5f is not available"}
+	}}
+	capped := &fakeNode{t: t, status: func(int) int { return http.StatusInternalServerError },
+		handle: func(int, rpcReq) (string, *Error) { return `"never"`, nil }}
+	s1, s2 := httptest.NewServer(pruned), httptest.NewServer(capped)
+	defer s1.Close()
+	defer s2.Close()
+	reqs := []Request{{Method: "eth_call"}, {Method: "eth_call"}}
+	if err := newClient(t, s1.URL, s2.URL).Batch(context.Background(), reqs); err != nil {
+		t.Fatal(err)
+	}
+	for i, q := range reqs {
+		if !IsMissingState(q.Err) {
+			t.Errorf("reqs[%d].Err = %v, want the pruned-state refusal", i, q.Err)
+		}
+	}
+}
