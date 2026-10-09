@@ -96,7 +96,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	applied, err := s.Migrate(ctx)
-	if err != nil || len(applied) != 5 {
+	if err != nil || len(applied) != 6 {
 		t.Fatalf("migrate = %v, %v", applied, err)
 	}
 	if again, err := s.Migrate(ctx); err != nil || len(again) != 0 {
@@ -241,6 +241,43 @@ func TestDynamicFeeMigrationFixesCachedPools(t *testing.T) {
 		if p.DynamicFee != dynamic || p.FeePips != want {
 			t.Errorf("pool %s: dynamic_fee = %v fee_pips = %d, want %v %d", p.ID, p.DynamicFee, p.FeePips, dynamic, want)
 		}
+	}
+}
+
+// Before Algebra factories were supported, Camelot v3 pools were cached as not
+// canonical v3 pools; migration 0006 forgets those so they are resolved again.
+func TestReresolveMigrationForgetsNonCanonicalV3Pools(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if _, err := s.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rejectedV3 := dex.PoolIDFromAddress(addr(0xc3))
+	rejectedV2 := dex.PoolIDFromAddress(addr(0xc2))
+	cached := []dex.Pool{
+		{ID: v3, Contract: addr(1), Kind: dex.KindV3, Canonical: true, FeePips: 500},
+		{ID: rejectedV3, Contract: addr(0xc3), Kind: dex.KindV3},
+		{ID: rejectedV2, Contract: addr(0xc2), Kind: dex.KindV2},
+	}
+	if err := s.insertPools(ctx, cached, s.now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.conn.Exec(ctx, "DELETE FROM schema_migrations WHERE version = '0006_reresolve_v3_pools'"); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := s.Migrate(ctx); err != nil || !slices.Equal(applied, []string{"0006_reresolve_v3_pools"}) {
+		t.Fatalf("re-applying 0006 = %v, %v", applied, err)
+	}
+	got, err := s.LoadPools(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]dex.PoolID, 0, len(got))
+	for _, p := range got {
+		ids = append(ids, p.ID)
+	}
+	if len(ids) != 2 || !slices.Contains(ids, v3) || !slices.Contains(ids, rejectedV2) {
+		t.Fatalf("pools after 0006 = %v; want the canonical v3 pool and the v2 row kept, the rejected v3 row gone", ids)
 	}
 }
 

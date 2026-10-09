@@ -59,7 +59,7 @@ type Pool struct {
 	Token0     eth.Address `json:"token0"`               // native ETH is aliased to WETH (see Native)
 	Token1     eth.Address `json:"token1"`               //
 	FeePips    uint32      `json:"fee_pips,omitzero"`    // fee tier in hundredths of a bip (500 = 0.05%); 0 if DynamicFee
-	DynamicFee bool        `json:"dynamic_fee,omitzero"` // v4: the hooks set the fee per swap; there is no tier
+	DynamicFee bool        `json:"dynamic_fee,omitzero"` // v4 hooks or Algebra set the fee per swap; no tier
 	Hooks      eth.Address `json:"hooks,omitzero"`       // v4 hooks contract (zero if none)
 	Native     bool        `json:"native,omitzero"`      // v4: token0 is native ETH, aliased to WETH
 	FirstSeen  uint64      `json:"first_seen"`           // first block seen (v4: initialization block)
