@@ -401,13 +401,13 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "victoriametrics"
+        "uid": "prometheus"
       },
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "victoriametrics"
+            "uid": "prometheus"
           },
           "expr": "mevlens_head_lag_blocks",
           "legendFormat": "lag",
@@ -433,15 +433,15 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "victoriametrics"
+        "uid": "prometheus"
       },
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "victoriametrics"
+            "uid": "prometheus"
           },
-          "expr": "rate(mevlens_blocks_processed_total[1m])",
+          "expr": "rate(mevlens_blocks_processed_total[$__rate_interval])",
           "legendFormat": "blocks/s",
           "refId": "A"
         }
@@ -465,15 +465,15 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "victoriametrics"
+        "uid": "prometheus"
       },
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "victoriametrics"
+            "uid": "prometheus"
           },
-          "expr": "sum by (endpoint, result) (rate(mevlens_rpc_round_trips_total[1m]))",
+          "expr": "sum by (endpoint, result) (rate(mevlens_rpc_round_trips_total[$__rate_interval]))",
           "legendFormat": "{{endpoint}} {{result}}",
           "refId": "A"
         }
@@ -497,13 +497,13 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "victoriametrics"
+        "uid": "prometheus"
       },
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "victoriametrics"
+            "uid": "prometheus"
           },
           "expr": "histogram_quantile(0.99, sum by (le, endpoint) (rate(mevlens_rpc_round_trip_duration_seconds_bucket[5m])))",
           "legendFormat": "{{endpoint}}",
@@ -531,13 +531,13 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "victoriametrics"
+        "uid": "prometheus"
       },
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "victoriametrics"
+            "uid": "prometheus"
           },
           "expr": "histogram_quantile(0.99, sum by (le) (rate(mevlens_flush_duration_seconds_bucket[5m])))",
           "legendFormat": "p99",
@@ -565,13 +565,13 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "victoriametrics"
+        "uid": "prometheus"
       },
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "victoriametrics"
+            "uid": "prometheus"
           },
           "expr": "mevlens_processed_block_age_seconds",
           "legendFormat": "age",

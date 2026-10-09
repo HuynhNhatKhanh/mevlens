@@ -1,0 +1,73 @@
+# Alerts on the observer's own health. Both observer jobs are matched: `mevlens`
+# (compose `--profile observer`) and `mevlens-host` (`make follow`); only one of
+# them normally runs, so the rules aggregate across jobs instead of alerting on
+# the idle one. Unit tests: ../tests/mevlens_test.yml.
+groups:
+  - name: mevlens
+    rules:
+      - alert: MevlensDown
+        # Neither observer target answers a scrape.
+        expr: sum(up{job=~"mevlens|mevlens-host"}) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: No MEVLens observer is being scraped
+          description: Neither the compose observer nor `make follow` on the host has answered a scrape for 2 minutes.
+
+      - alert: MevlensStalled
+        # Up but not processing: fetch or resolution retrying forever, or a sink
+        # that stays down (flushes are retried, so processing pauses). Works for
+        # backfill too, unlike block age, which is large for historical blocks.
+        expr: sum(rate(mevlens_blocks_processed_total[5m])) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: MEVLens has processed no block for 10 minutes
+          description: The observer is up but its pipeline is stalled. Check the RPC endpoints, the logs for "still unavailable" or "flush failed", and ClickHouse.
+
+      - alert: MevlensFallingBehind
+        # Follow mode only (the head is unknown during a backfill, so lag is 0).
+        # 240 blocks is about a minute of Arbitrum One.
+        expr: max(mevlens_head_lag_blocks) > 240
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: MEVLens is falling behind the chain head
+          description: The last processed block has been more than 240 blocks (about a minute) behind the head for 10 minutes; the RPC endpoints are likely too slow or rate-limited.
+
+      - alert: MevlensFlushFailing
+        # Failed writes are retried with the same batch until they succeed;
+        # sustained failures mean ClickHouse is down or rejecting inserts.
+        expr: sum(increase(mevlens_flush_errors_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: MEVLens cannot write to ClickHouse
+          description: Batch writes have kept failing for 5 minutes. Ingestion is paused while they are retried.
+
+      - alert: MevlensIncompleteBlocks
+        # A block processed with unresolved pools skipped may be missing swaps and
+        # arbitrages; mevlens_resolve_skipped_last_block tells which to re-ingest.
+        expr: sum(increase(mevlens_resolve_skipped_blocks_total[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Blocks were processed with unresolved pools
+          description: Some blocks in the last hour may be missing swaps and arbitrages. See mevlens_resolve_skipped_last_block and re-ingest them with a backfill.
+
+      - alert: MevlensRPCErrors
+        # Free endpoints fail routinely (429s, cooldowns), so only a sustained
+        # majority of failed round trips is worth a page.
+        expr: |
+          sum(rate(mevlens_rpc_round_trips_total{result="error"}[5m]))
+            / sum(rate(mevlens_rpc_round_trips_total[5m])) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Most JSON-RPC round trips are failing
+          description: More than half of the RPC round trips have failed for 10 minutes. See mevlens_rpc_round_trips_total by endpoint.

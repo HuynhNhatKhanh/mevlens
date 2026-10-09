@@ -7,16 +7,21 @@ RUN_ENV := CLICKHOUSE_ADDR=$${CLICKHOUSE_ADDR:-127.0.0.1:9000} CLICKHOUSE_USER=$
 # Admin server of `make follow`. It is unauthenticated (pprof, execution traces),
 # so it must not listen on the LAN. Default: the docker0 bridge address, which is
 # what compose's host.docker.internal (host-gateway) resolves to on Linux, so
-# VictoriaMetrics can still scrape the host process; 127.0.0.1 where there is no
+# Prometheus can still scrape the host process; 127.0.0.1 where there is no
 # docker0 (Docker Desktop forwards host.docker.internal to the host's loopback).
 # Override with e.g. `make follow LISTEN=127.0.0.1:9464`.
 DOCKER_GW = $(shell ip -4 -o addr show dev docker0 2>/dev/null | awk '{sub("/.*", "", $$4); print $$4; exit}')
 LISTEN   ?= $(or $(DOCKER_GW),127.0.0.1):9464
 
-.PHONY: help build test race itest bench lint vuln fmt cover up down follow inspect clean
+# promtool/amtool come from the very images compose runs (one place to bump them).
+compose_image = $(shell awk '$$1 == "image:" && index($$2, "$(1):") == 1 {print $$2; exit}' deploy/compose.yaml)
+PROMETHEUS_IMAGE   = $(call compose_image,prom/prometheus)
+ALERTMANAGER_IMAGE = $(call compose_image,prom/alertmanager)
+
+.PHONY: help build test race itest bench lint vuln fmt cover monitoring-check up down follow inspect clean
 
 help: ## Show targets
-	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-10s %s\n", $$1, $$2}'
+	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-17s %s\n", $$1, $$2}'
 
 build: ## Build bin/mevlens
 	go build -trimpath -o bin/mevlens ./cmd/mevlens
@@ -45,8 +50,13 @@ vuln: ## Known-vulnerability scan
 fmt: ## Format
 	gofmt -w cmd internal
 
-up: ## Start ClickHouse, VictoriaMetrics and Grafana
-	$(COMPOSE) up -d
+monitoring-check: ## Validate the Prometheus/Alertmanager config and unit-test the alert rules (Docker)
+	docker run --rm -v "$(CURDIR)/deploy/prometheus:/etc/prometheus:ro" --entrypoint promtool $(PROMETHEUS_IMAGE) check config /etc/prometheus/prometheus.yml
+	docker run --rm -v "$(CURDIR)/deploy/prometheus:/etc/prometheus:ro" --entrypoint promtool $(PROMETHEUS_IMAGE) test rules /etc/prometheus/tests/mevlens_test.yml
+	docker run --rm -v "$(CURDIR)/deploy/alertmanager:/etc/alertmanager:ro" --entrypoint amtool $(ALERTMANAGER_IMAGE) check-config /etc/alertmanager/alertmanager.yml
+
+up: ## Start ClickHouse, Prometheus, Alertmanager and Grafana
+	$(COMPOSE) up -d --remove-orphans
 
 down: ## Stop the stack (data volumes are kept)
 	$(COMPOSE) down

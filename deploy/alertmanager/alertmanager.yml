@@ -1,0 +1,30 @@
+# Alertmanager: groups, deduplicates and routes the alerts Prometheus fires.
+# Alerts are visible at http://localhost:9093 and in Grafana (Alerting → Alert
+# rules / the Alertmanager datasource) without any receiver configured.
+#
+# To get notified, add a receiver and point the route at it, e.g.:
+#
+#   receivers:
+#     - name: telegram
+#       telegram_configs:
+#         - bot_token_file: /etc/alertmanager/telegram-token  # keep secrets out of git
+#           chat_id: 123456789
+#
+# (slack_configs, email_configs, webhook_configs, ... work the same way.)
+route:
+  receiver: default
+  group_by: [alertname]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: default # no notifier: alerts are only shown in the UIs
+
+inhibit_rules:
+  # When nothing is scraped, the pipeline alerts are only symptoms.
+  - source_matchers: [alertname="MevlensDown"]
+    target_matchers: [alertname=~"MevlensStalled|MevlensFallingBehind|MevlensFlushFailing|MevlensRPCErrors"]
+  # A stalled pipeline necessarily falls behind.
+  - source_matchers: [alertname="MevlensStalled"]
+    target_matchers: [alertname="MevlensFallingBehind"]

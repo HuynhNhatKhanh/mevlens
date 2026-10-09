@@ -42,7 +42,8 @@ flowchart LR
     end
     P -->|idempotent batches + checkpoint| CH[("ClickHouse")]
     CH --> G["Grafana"]
-    Pipeline -->|/metrics| VM[("VictoriaMetrics")] --> G
+    Pipeline -->|/metrics| PR[("Prometheus")] --> G
+    PR -->|alerts| AM["Alertmanager"]
 ```
 
 Key decisions (each one is an ADR in [`docs/adr`](docs/adr)):
@@ -65,12 +66,13 @@ Requirements: Go 1.27+, Docker.
 # 1. No database needed: classify the latest block straight from public RPC
 make inspect
 
-# 2. Full stack: ClickHouse + VictoriaMetrics + Grafana
+# 2. Full stack: ClickHouse + Prometheus + Alertmanager + Grafana
 export CLICKHOUSE_PASSWORD='choose-one' GRAFANA_ADMIN_PASSWORD='choose-one'
 export CLICKHOUSE_GRAFANA_PASSWORD='choose-one'  # Grafana's read-only ClickHouse user
 make up
 make follow            # ingest new blocks; Ctrl-C flushes and checkpoints (twice: exit now)
 open http://localhost:3000   # dashboard: MEVLens → Arbitrum Arbitrage Observatory
+open http://localhost:9090   # Prometheus: Status → Targets, Alerts, PromQL
 
 # Historical range (resumable: re-running continues from its checkpoint)
 CLICKHOUSE_ADDR=127.0.0.1:9000 CLICKHOUSE_USER=mevlens \
@@ -125,9 +127,30 @@ authentication) serves:
 
 `make follow` binds it to the docker0 bridge address (`172.17.0.1:9464` by
 default), which is what `host.docker.internal` resolves to inside compose, so
-VictoriaMetrics scrapes the host process without the server listening on the
-LAN. Without a docker0 interface (Docker Desktop) it falls back to
+Prometheus scrapes the host process without the server listening on the LAN. Without a docker0 interface (Docker Desktop) it falls back to
 `127.0.0.1:9464`. Override with `make follow LISTEN=ADDR`; avoid `0.0.0.0`.
+
+### Metrics and alerts
+
+Prometheus (`http://localhost:9090`) scrapes the observer every 10s and keeps 90
+days. Its alert rules ([`deploy/prometheus/rules`](deploy/prometheus/rules))
+cover the observer's own health:
+
+| Alert | Fires when |
+|---|---|
+| `MevlensDown` (critical) | no observer target has answered a scrape for 2 min |
+| `MevlensStalled` (critical) | up, but no block processed for 10 min (fetch, resolution or ClickHouse stuck) |
+| `MevlensFallingBehind` | follow mode more than 240 blocks (~1 min) behind the head for 10 min |
+| `MevlensFlushFailing` | ClickHouse writes failing (and being retried) for 5 min |
+| `MevlensIncompleteBlocks` | a block was processed with unresolved pools in the last hour (re-ingest it) |
+| `MevlensRPCErrors` | most JSON-RPC round trips failing for 10 min |
+
+Alertmanager (`http://localhost:9093`, also a Grafana datasource) groups them
+and silences symptoms of a bigger alert. No notifier is configured; add a
+receiver (Slack, Telegram, email, webhook) in
+[`deploy/alertmanager/alertmanager.yml`](deploy/alertmanager/alertmanager.yml).
+`make monitoring-check` validates both configs and runs the rules' unit tests
+(`promtool test rules`); CI runs it too.
 
 ## Testing
 
@@ -137,6 +160,7 @@ make race     # with the race detector
 make itest    # ClickHouse integration tests (needs `make up`)
 make lint     # golangci-lint v2, including the pure-core depguard rule
 make bench
+make monitoring-check  # Prometheus/Alertmanager configs + alert rule unit tests (Docker)
 ```
 
 - **Golden tests on real blocks.** The fixtures in `internal/classify/testdata` are mainnet blocks. Each expected arbitrage was recomputed by an independent script from raw chain data. One is v3-only (+24,062 USDC base units, matching the executor's ERC-20 transfers). Two route through Uniswap v4, with native ETH netted as WETH. In one of those, the executor's own balances don't change because profit is forwarded elsewhere.
