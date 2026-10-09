@@ -6,7 +6,10 @@
 // dashboards show valuation coverage explicitly.
 //
 // An Oracle is a pure state machine fed by observed swaps, so replaying the same
-// blocks yields the same valuations. It is not safe for concurrent use.
+// blocks yields the same valuations. A price is only used to value blocks at or
+// after the one it was observed at, and only for MaxAgeBlocks blocks: valuation
+// never looks ahead and never silently carries a dead feed forward. It is not
+// safe for concurrent use.
 package pricing
 
 import (
@@ -32,7 +35,17 @@ type Config struct {
 	Stables   []Stable
 	RefPool   eth.Address // Uniswap-v3-style WETH/RefStable pool used for ETH/USD
 	RefStable eth.Address // must be one of Stables
+	// MaxAgeBlocks is how many blocks an ETH/USD observation stays usable; older
+	// prices leave stablecoin amounts unvalued. Zero means DefaultMaxAgeBlocks.
+	MaxAgeBlocks uint64
 }
+
+// DefaultMaxAgeBlocks is about one hour of Arbitrum One blocks (~4 blocks/s). The
+// reference pool is the deepest WETH/USDC pool and trades many times a minute, so
+// an hour without a swap means the feed is broken (pool migrated, swaps no longer
+// decoded), not that the market is quiet. ETH/USD rarely moves more than a few
+// percent in an hour, which bounds the error of the oldest price still accepted.
+const DefaultMaxAgeBlocks = 14_400
 
 // Sanity bounds for ETH/USD; observations outside are ignored as corrupt.
 const (
@@ -47,7 +60,8 @@ type Oracle struct {
 	ref        eth.Address
 	wethIsTok0 bool
 	// scale converts (sqrtP/2^96)^2 into USD per ETH (or ETH per USD) given decimals.
-	scale float64
+	scale  float64
+	maxAge uint64
 
 	ethUSD float64
 	block  uint64
@@ -59,7 +73,10 @@ func New(cfg Config) (*Oracle, error) {
 	if cfg.WETH.IsZero() {
 		return nil, errors.New("pricing: WETH address is required")
 	}
-	o := &Oracle{weth: cfg.WETH, stables: make(map[eth.Address]uint8, len(cfg.Stables)), ref: cfg.RefPool}
+	o := &Oracle{weth: cfg.WETH, stables: make(map[eth.Address]uint8, len(cfg.Stables)), ref: cfg.RefPool, maxAge: cfg.MaxAgeBlocks}
+	if o.maxAge == 0 {
+		o.maxAge = DefaultMaxAgeBlocks
+	}
 	for _, s := range cfg.Stables {
 		if s.Decimals > 36 {
 			return nil, fmt.Errorf("pricing: stable %s has %d decimals", s.Address, s.Decimals)
@@ -94,8 +111,8 @@ func (o *Oracle) ObserveSwap(s *dex.Swap, block uint64) {
 	o.SetSqrtPrice(&s.SqrtPriceX96, block)
 }
 
-// SetSqrtPrice sets the reference price from a Uniswap v3 sqrtPriceX96 (e.g. slot0
-// at startup). Implausible values are ignored.
+// SetSqrtPrice sets the reference price from a Uniswap v3 sqrtPriceX96 observed in
+// the state of block (e.g. slot0 read at startup). Implausible values are ignored.
 func (o *Oracle) SetSqrtPrice(sqrtPriceX96 *uint256.Int, block uint64) bool {
 	if o.ref.IsZero() || sqrtPriceX96.IsZero() {
 		return false
@@ -115,16 +132,25 @@ func (o *Oracle) SetSqrtPrice(sqrtPriceX96 *uint256.Int, block uint64) bool {
 // ETHUSD returns the last observed ETH/USD price and the block it was observed at.
 func (o *Oracle) ETHUSD() (price float64, block uint64, ok bool) { return o.ethUSD, o.block, o.known }
 
-// ValueETH converts amount of token into ETH. ok is false when the token is not
-// covered or no ETH/USD price has been observed yet.
-func (o *Oracle) ValueETH(token eth.Address, amount *uint256.Int) (float64, bool) {
+// ValueETH converts amount of token, moved in block, into ETH. ok is false when the
+// token is not covered or no usable ETH/USD price exists for block: none observed
+// yet, observed more than MaxAgeBlocks before block, or observed after it.
+func (o *Oracle) ValueETH(token eth.Address, amount *uint256.Int, block uint64) (float64, bool) {
 	if token == o.weth {
 		return amount.Float64() / 1e18, true
 	}
 	dec, ok := o.stables[token]
-	if !ok || !o.known {
+	if !ok || !o.usableAt(block) {
 		return 0, false
 	}
 	usd := amount.Float64() / math.Pow10(int(dec))
 	return usd / o.ethUSD, true
+}
+
+// usableAt reports whether the current price may value amounts moved in block. A
+// price from a later block is only possible after a reorg rewind replays older
+// blocks; it comes from the abandoned fork and would be look-ahead, so it is
+// refused until the replay observes a reference swap of its own.
+func (o *Oracle) usableAt(block uint64) bool {
+	return o.known && o.block <= block && block-o.block <= o.maxAge
 }

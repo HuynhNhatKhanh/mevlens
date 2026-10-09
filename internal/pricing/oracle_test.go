@@ -42,7 +42,7 @@ func TestWETHAsToken0(t *testing.T) {
 	if !ok || block != 42 || !near(p, 3000) {
 		t.Fatalf("ETHUSD = %v @%d ok=%v", p, block, ok)
 	}
-	v, ok := o.ValueETH(usdc, uint256.NewInt(1500e6))
+	v, ok := o.ValueETH(usdc, uint256.NewInt(1500e6), 42)
 	if !ok || !near(v, 0.5) {
 		t.Fatalf("1500 USDC = %v ETH", v)
 	}
@@ -64,14 +64,67 @@ func TestWETHAsToken1(t *testing.T) {
 
 func TestValuationCoverage(t *testing.T) {
 	o, _ := New(Config{WETH: weth, Stables: []Stable{{usdc, 6}}, RefPool: ref, RefStable: usdc})
-	if v, ok := o.ValueETH(weth, uint256.NewInt(2e18)); !ok || v != 2 {
+	if v, ok := o.ValueETH(weth, uint256.NewInt(2e18), 1); !ok || v != 2 {
 		t.Fatalf("WETH = %v %v", v, ok)
 	}
-	if _, ok := o.ValueETH(usdc, uint256.NewInt(1)); ok {
+	if _, ok := o.ValueETH(usdc, uint256.NewInt(1), 1); ok {
 		t.Fatal("stable must be unvalued before any ETH/USD observation")
 	}
-	if _, ok := o.ValueETH(ref, uint256.NewInt(1)); ok {
+	if _, ok := o.ValueETH(ref, uint256.NewInt(1), 1); ok {
 		t.Fatal("unknown token must be unvalued")
+	}
+}
+
+func TestPriceExpiresAfterMaxAge(t *testing.T) {
+	o, _ := New(Config{WETH: weth, Stables: []Stable{{usdc, 6}}, RefPool: ref, RefStable: usdc, MaxAgeBlocks: 100})
+	o.SetSqrtPrice(sqrtPriceFor(3000e6/1e18), 1000)
+	for _, tc := range []struct {
+		block uint64
+		ok    bool
+	}{
+		{999, false}, // before the observation: look-ahead after a reorg rewind
+		{1000, true},
+		{1100, true}, // exactly MaxAgeBlocks old
+		{1101, false},
+	} {
+		if _, ok := o.ValueETH(usdc, uint256.NewInt(3000e6), tc.block); ok != tc.ok {
+			t.Errorf("price @1000 valuing block %d: ok=%v, want %v", tc.block, ok, tc.ok)
+		}
+	}
+	if v, ok := o.ValueETH(weth, uint256.NewInt(1e18), 1_000_000); !ok || v != 1 {
+		t.Fatalf("WETH needs no price, yet stale price gave %v %v", v, ok)
+	}
+	// A fresh observation revives valuation.
+	o.SetSqrtPrice(sqrtPriceFor(3000e6/1e18), 1101)
+	if _, ok := o.ValueETH(usdc, uint256.NewInt(3000e6), 1101); !ok {
+		t.Fatal("fresh price rejected")
+	}
+}
+
+func TestDefaultMaxAge(t *testing.T) {
+	o, _ := New(Config{WETH: weth, Stables: []Stable{{usdc, 6}}, RefPool: ref, RefStable: usdc})
+	o.SetSqrtPrice(sqrtPriceFor(3000e6/1e18), 0)
+	if _, ok := o.ValueETH(usdc, uint256.NewInt(1), DefaultMaxAgeBlocks); !ok {
+		t.Fatal("zero MaxAgeBlocks must mean DefaultMaxAgeBlocks")
+	}
+	if _, ok := o.ValueETH(usdc, uint256.NewInt(1), DefaultMaxAgeBlocks+1); ok {
+		t.Fatal("price older than DefaultMaxAgeBlocks accepted")
+	}
+}
+
+func TestSeedIsRecordedAtItsBlock(t *testing.T) {
+	// A startup seed read from the state of block 511 (the parent of the first
+	// processed block) must be dated 511, not 0, or a replay of old blocks would
+	// treat it as ancient (or, dated "latest", as current).
+	o, _ := New(Config{WETH: weth, Stables: []Stable{{usdc, 6}}, RefPool: ref, RefStable: usdc, MaxAgeBlocks: 10})
+	if !o.SetSqrtPrice(sqrtPriceFor(3000e6/1e18), 511) {
+		t.Fatal("seed rejected")
+	}
+	if _, block, ok := o.ETHUSD(); !ok || block != 511 {
+		t.Fatalf("seed recorded at %d (ok=%v), want 511", block, ok)
+	}
+	if v, ok := o.ValueETH(usdc, uint256.NewInt(1500e6), 512); !ok || !near(v, 0.5) {
+		t.Fatalf("first processed block: %v %v", v, ok)
 	}
 }
 

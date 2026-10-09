@@ -240,7 +240,7 @@ func (c *Classifier) detect(blk *BlockInfo, r *eth.Receipt) (Arb, bool) {
 		}
 		var amount uint256.Int
 		amount.Sub(&f.credit, &f.debit)
-		v, ok := c.prices.ValueETH(f.token, &amount)
+		v, ok := c.prices.ValueETH(f.token, &amount, blk.Number)
 		a.ProfitETH += v
 		a.Valued = a.Valued && ok
 	}

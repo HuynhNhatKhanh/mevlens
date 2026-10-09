@@ -77,6 +77,9 @@ weth = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
 reference_factory = "uniswap-v3"
 reference_stable = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
 reference_fee = 500
+# Blocks an ETH/USD observation stays usable (~1h at ~4 blocks/s). Older prices
+# leave stablecoin profits unvalued instead of valuing them at a dead feed.
+max_price_age_blocks = 14400
 
 [[pricing.stables]]
 symbol = "USDC"

@@ -56,6 +56,24 @@ func TestUnknownKeysAreRejected(t *testing.T) {
 	}
 }
 
+func TestMaxPriceAge(t *testing.T) {
+	c, err := Parse(minimal, env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// pricing.DefaultMaxAgeBlocks, about one hour of blocks.
+	if got := c.PricingConfig(c.Pricing.WETH).MaxAgeBlocks; got != 14_400 {
+		t.Fatalf("default max price age = %d, want 14400", got)
+	}
+	c, err = Parse(minimal+"max_price_age_blocks = 600\n", env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.PricingConfig(c.Pricing.WETH).MaxAgeBlocks; got != 600 {
+		t.Fatalf("max_price_age_blocks = %d, want 600", got)
+	}
+}
+
 func TestValidationReportsAllErrors(t *testing.T) {
 	_, err := Parse(`
 [[dex.factories]]
