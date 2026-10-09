@@ -48,10 +48,11 @@ type RPC struct {
 }
 
 type Endpoint struct {
-	Name  string  `toml:"name"`
-	URL   string  `toml:"url"`
-	RPS   float64 `toml:"rps"`
-	Burst int     `toml:"burst"`
+	Name     string  `toml:"name"`
+	URL      string  `toml:"url"`
+	RPS      float64 `toml:"rps"`
+	Burst    int     `toml:"burst"`
+	MaxBatch int     `toml:"max_batch"` // 0 = rpc.max_batch; for plans that refuse larger batches
 }
 
 type DEX struct {
@@ -207,6 +208,9 @@ func (c *Config) Validate() error {
 		if e.Name == "" || names[e.Name] {
 			errs = append(errs, fmt.Errorf("rpc.endpoints[%d].name must be unique and non-empty", i))
 		}
+		if e.MaxBatch < 0 {
+			errs = append(errs, fmt.Errorf("rpc.endpoints[%d].max_batch must not be negative", i))
+		}
 		names[e.Name] = true
 	}
 	factories := map[string]Factory{}
@@ -258,7 +262,9 @@ func (c *Config) Validate() error {
 func (c *Config) RPCConfig() rpc.Config {
 	out := rpc.Config{MaxBatch: c.RPC.MaxBatch, Timeout: c.RPC.Timeout, MaxAttempts: c.RPC.MaxAttempts}
 	for _, e := range c.RPC.Endpoints {
-		out.Endpoints = append(out.Endpoints, rpc.EndpointConfig{Name: e.Name, URL: e.URL, RPS: e.RPS, Burst: e.Burst})
+		out.Endpoints = append(out.Endpoints, rpc.EndpointConfig{
+			Name: e.Name, URL: e.URL, RPS: e.RPS, Burst: e.Burst, MaxBatch: e.MaxBatch,
+		})
 	}
 	return out
 }

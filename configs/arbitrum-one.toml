@@ -28,6 +28,8 @@ rps = 4
 name = "drpc"
 url = "https://arbitrum.drpc.org"
 rps = 4
+# The free plan answers any batch of more than 3 requests with HTTP 500.
+max_batch = 3
 
 [[rpc.endpoints]]
 name = "meowrpc"

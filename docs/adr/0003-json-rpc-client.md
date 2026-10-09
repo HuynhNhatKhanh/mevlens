@@ -15,6 +15,8 @@ A small client (`internal/rpc`) with its own wire types (`internal/eth`) and
 - one HTTP batch per block (`eth_getBlockByNumber` + `eth_getBlockReceipts`),
   validated for consistency (`ErrInconsistent` is retryable)
 - a token-bucket rate limiter per endpoint, round-robin across healthy endpoints
+- an optional batch cap per endpoint (`max_batch`): some free plans refuse any
+  batch over a few requests, so batches sent there are split
 - retries only of the failed requests inside a batch, with full-jitter backoff
 - runtime learning of unsupported methods per endpoint: fail over immediately,
   with no cooldown

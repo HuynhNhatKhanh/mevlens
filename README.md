@@ -92,6 +92,8 @@ errors, not silent defaults.
 To ingest faster, add a keyed free-tier provider with a higher `rps`. With four
 public endpoints at 4 rps each, the observer processes about 6 blocks/s.
 Arbitrum produces about 4 blocks/s, so catching up after downtime is slow.
+An endpoint whose plan caps the batch size takes its own `max_batch` (dRPC's
+free plan refuses batches over 3 requests).
 
 ## Data model
 
