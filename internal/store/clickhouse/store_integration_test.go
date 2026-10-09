@@ -179,7 +179,15 @@ func TestStoreRoundTrip(t *testing.T) {
 		t.Fatalf("bots = %v, %v", bots, err)
 	}
 
-	// Reorg rewind removes rows >= 101 and resets the checkpoint.
+	// Reorg rewind removes rows >= 101 and resets the checkpoint. It completes
+	// even when the caller's context is already cancelled (a SIGTERM midway used
+	// to leave rows deleted behind an unmoved checkpoint), and is idempotent, as
+	// resume re-runs it after an interruption.
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := s.Rewind(cancelled, "follow", 101); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Rewind(ctx, "follow", 101); err != nil {
 		t.Fatal(err)
 	}

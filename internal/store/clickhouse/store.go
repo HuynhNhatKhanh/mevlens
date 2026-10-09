@@ -317,9 +317,25 @@ func (s *Store) LoadCheckpoint(ctx context.Context, name string) (observe.Checkp
 	return cp, true, nil
 }
 
-// Rewind deletes every row at or above block from, then moves the checkpoint to
-// from-1 with an unknown hash so the next run starts at from without a parent check.
+// rewindTimeout bounds a rewind, which runs to completion even when the caller's
+// context is cancelled.
+const rewindTimeout = 2 * time.Minute
+
+// Rewind moves the checkpoint to from-1 with an unknown hash, then deletes every
+// row at or above block from, so the next run starts at from without a parent
+// check.
+//
+// The checkpoint moves first: interrupted anywhere after that, the next run
+// resumes at from and calls Rewind again (deletes are idempotent), instead of
+// resuming past rows that are already gone. The rewind is not cancelled with ctx
+// (a SIGTERM midway would otherwise leave exactly that gap). At from = 0 the
+// checkpoint is block 0: genesis carries no swaps and is not re-ingested.
 func (s *Store) Rewind(ctx context.Context, checkpoint string, from uint64) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rewindTimeout)
+	defer cancel()
+	if err := s.SaveCheckpoint(ctx, observe.Checkpoint{Name: checkpoint, Block: max(from, 1) - 1}); err != nil {
+		return fmt.Errorf("clickhouse: rewind: %w", err)
+	}
 	for _, q := range []string{
 		"DELETE FROM swaps WHERE block >= ?",
 		"DELETE FROM arbitrages WHERE block >= ?",
@@ -329,10 +345,7 @@ func (s *Store) Rewind(ctx context.Context, checkpoint string, from uint64) erro
 			return fmt.Errorf("clickhouse: rewind: %w", err)
 		}
 	}
-	if from == 0 {
-		return nil
-	}
-	return s.SaveCheckpoint(ctx, observe.Checkpoint{Name: checkpoint, Block: from - 1})
+	return nil
 }
 
 // LoadPools returns every cached pool.
