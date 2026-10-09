@@ -652,7 +652,7 @@
       "factory": "0x360e68faccca8ca495c1b759fd9eee466db9fb32",
       "token0": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
       "token1": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
-      "fee_pips": 8388608,
+      "dynamic_fee": true,
       "hooks": "0xd73339564ac99f3e09b0ebc80603ff8b796500c0",
       "native": true,
       "first_seen": 343248706

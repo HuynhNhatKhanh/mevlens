@@ -50,18 +50,19 @@ func (id *PoolID) UnmarshalText(b []byte) error {
 // Pool is the resolved metadata of a pool. It is plain domain data: resolving it
 // from the chain is the registry's job.
 type Pool struct {
-	ID        PoolID      `json:"id"`
-	Contract  eth.Address `json:"contract"` // emitting contract: the pool itself, or the v4 PoolManager
-	Kind      Kind        `json:"kind"`
-	Canonical bool        `json:"canonical"`
-	Venue     string      `json:"venue,omitzero"`    // factory name; empty when not canonical
-	Factory   eth.Address `json:"factory"`           // factory, or the PoolManager for v4
-	Token0    eth.Address `json:"token0"`            // native ETH is aliased to WETH (see Native)
-	Token1    eth.Address `json:"token1"`            //
-	FeePips   uint32      `json:"fee_pips,omitzero"` // fee tier in hundredths of a bip (500 = 0.05%)
-	Hooks     eth.Address `json:"hooks,omitzero"`    // v4 hooks contract (zero if none)
-	Native    bool        `json:"native,omitzero"`   // v4: token0 is native ETH, aliased to WETH
-	FirstSeen uint64      `json:"first_seen"`        // first block seen (v4: initialization block)
+	ID         PoolID      `json:"id"`
+	Contract   eth.Address `json:"contract"` // emitting contract: the pool itself, or the v4 PoolManager
+	Kind       Kind        `json:"kind"`
+	Canonical  bool        `json:"canonical"`
+	Venue      string      `json:"venue,omitzero"`       // factory name; empty when not canonical
+	Factory    eth.Address `json:"factory"`              // factory, or the PoolManager for v4
+	Token0     eth.Address `json:"token0"`               // native ETH is aliased to WETH (see Native)
+	Token1     eth.Address `json:"token1"`               //
+	FeePips    uint32      `json:"fee_pips,omitzero"`    // fee tier in hundredths of a bip (500 = 0.05%); 0 if DynamicFee
+	DynamicFee bool        `json:"dynamic_fee,omitzero"` // v4: the hooks set the fee per swap; there is no tier
+	Hooks      eth.Address `json:"hooks,omitzero"`       // v4 hooks contract (zero if none)
+	Native     bool        `json:"native,omitzero"`      // v4: token0 is native ETH, aliased to WETH
+	FirstSeen  uint64      `json:"first_seen"`           // first block seen (v4: initialization block)
 }
 
 // Candidate is a pool referenced by a log that still needs to be resolved. For

@@ -198,7 +198,7 @@ func (c *Classifier) collectSwaps(res *Result, r *eth.Receipt) {
 
 // detect applies the netting rule to c.txSwaps.
 func (c *Classifier) detect(blk *BlockInfo, r *eth.Receipt) (Arb, bool) {
-	if len(c.txSwaps) < 2 {
+	if !c.spansTwoPools() {
 		return Arb{}, false
 	}
 	c.flows = c.flows[:0]
@@ -255,6 +255,21 @@ func (c *Classifier) detect(blk *BlockInfo, r *eth.Receipt) (Arb, bool) {
 		a.Contracts[i] = c.txSwaps[i].swap.Contract
 	}
 	return a, true
+}
+
+// spansTwoPools reports whether c.txSwaps touch at least two distinct pools.
+// Counting swaps is not enough: a v4 Swap event carries only the AMM's part of
+// the trade, and deltas a hook returns are settled after it is emitted, so a
+// round trip on one hooked pool can net positive pool-side while the trader
+// lost. On a plain AMM such a round trip always loses, so nothing real is
+// excluded. Comparing against the first pool needs no scratch space.
+func (c *Classifier) spansTwoPools() bool {
+	for i := 1; i < len(c.txSwaps); i++ {
+		if c.txSwaps[i].pool.ID != c.txSwaps[0].pool.ID {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Classifier) addFlow(token eth.Address, credit, debit *uint256.Int) bool {

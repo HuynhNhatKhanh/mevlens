@@ -151,9 +151,17 @@ func DecodeSwap(l *eth.Log) (Swap, bool) {
 	return s, true
 }
 
+// V4DynamicFeeFlag is the PoolKey fee of a v4 pool whose hooks set the LP fee
+// per swap (LPFeeLibrary.DYNAMIC_FEE_FLAG). It is a marker, not a fee: read as
+// pips it would be 838%. Static fees are capped at 1,000,000 (100%), so the
+// two cannot collide.
+const V4DynamicFeeFlag = 0x800000
+
 // DecodeV4Initialize decodes a Uniswap v4 Initialize log into an unresolved Pool
 // (Canonical is left false: only the registry knows which PoolManager is trusted).
-// Native ETH (currency address zero) is reported as is; aliasing is policy.
+// Native ETH (currency address zero) is reported as is; aliasing is policy. A
+// dynamic-fee pool gets DynamicFee and FeePips 0, so the flag is never read as
+// a fee tier.
 func DecodeV4Initialize(l *eth.Log) (Pool, bool) {
 	if l.Removed || len(l.Topics) != 4 || l.Topics[0] != TopicV4Initialize || len(l.Data) != v4InitDataLen {
 		return Pool{}, false
@@ -162,7 +170,7 @@ func DecodeV4Initialize(l *eth.Log) (Pool, bool) {
 	copy(fee[:], l.Data[0:32])
 	hooks := eth.Hash{}
 	copy(hooks[:], l.Data[64:96])
-	return Pool{
+	p := Pool{
 		ID:       PoolID(l.Topics[1]),
 		Contract: l.Address,
 		Kind:     KindV4,
@@ -171,7 +179,11 @@ func DecodeV4Initialize(l *eth.Log) (Pool, bool) {
 		Token1:   l.Topics[3].Address(),
 		FeePips:  uint32(fee[29])<<16 | uint32(fee[30])<<8 | uint32(fee[31]),
 		Hooks:    hooks.Address(),
-	}, true
+	}
+	if p.FeePips == V4DynamicFeeFlag {
+		p.FeePips, p.DynamicFee = 0, true
+	}
+	return p, true
 }
 
 // splitSigned decodes an int256 word into its magnitude, stored in pos when the

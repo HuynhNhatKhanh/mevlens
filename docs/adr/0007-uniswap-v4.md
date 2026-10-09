@@ -37,6 +37,10 @@ mainnet, shape the design:
   `afterSwap`, so hooks that return deltas can make the pool-side view differ
   slightly from what the trader actually paid. `pools.hooks` lets analyses
   exclude hooked pools.
+- **Dynamic fees are a flag, not a tier.** A PoolKey fee of `0x800000`
+  (`LPFeeLibrary.DYNAMIC_FEE_FLAG`) means the hooks set the fee per swap. Such
+  pools have `dynamic_fee` set and `fee_pips` 0 (migration 0005), so the flag is
+  never read as an 838% fee.
 - **RPC capability.** Free endpoints cap `eth_getLogs` differently: Arbitrum's
   public RPC allows 10M blocks, dRPC's free plan 10k. A range refusal fails over
   to the next endpoint *for that call only*. The range is halved only when every

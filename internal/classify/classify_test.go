@@ -288,8 +288,9 @@ func TestPartiallyValuedProfitIsUnvalued(t *testing.T) {
 	// Profit in WETH and in ARB (not covered by the oracle): reporting only the
 	// WETH part would silently understate profit, so the arbitrage is unvalued.
 	r := receipt(0, eoa, bot, 1,
-		v2Swap(poolD, 1e18, 0, 0, 4100),     // pay 1 WETH, get 4100 ARB
-		v2Swap(poolD, 0, 4000, 1_001e15, 0), // pay 4000 ARB, get 1.001 WETH
+		v2Swap(poolD, 1e18, 0, 0, 4100),       // pay 1 WETH, get 4100 ARB
+		v2Swap(poolC, 4000, 0, 0, 3000e6),     // pay 4000 ARB, get 3000 USDC
+		v2Swap(poolA, 0, 3000e6, 1_001e15, 0), // pay 3000 USDC, get 1.001 WETH
 	)
 	res := New(testPools(), newOracle(t)).Classify(block(r))
 	if len(res.Arbs) != 1 {
@@ -384,5 +385,33 @@ func TestCandidatesIncludeV4InitializeAndSwaps(t *testing.T) {
 	got := New(poolsWithV4(), newOracle(t)).Candidates(b)
 	if len(got) != 2 || got[0].Init == nil || got[0].ID != newPool || got[1].Kind != dex.KindV4 || got[1].ID != newPool {
 		t.Fatalf("candidates = %+v", got)
+	}
+}
+
+func TestSamePoolRoundTripIsNotArbitrage(t *testing.T) {
+	// Both legs on one hooked v4 pool. The Swap events net +0.01 ETH and +1 USDC,
+	// but they omit the hook's deltas, settled after each event: an arbitrage
+	// needs two distinct pools, not two swaps.
+	samePool := receipt(0, eoa, bot, 1,
+		v4Swap(manager, v4Pool, u(1e18), neg(3000e6)),  // pay 3000 USDC, receive 1 ETH
+		v4Swap(manager, v4Pool, neg(99e16), u(3001e6)), // pay 0.99 ETH, receive 3001 USDC
+	)
+	c := New(poolsWithV4(), newOracle(t))
+	res := c.Classify(block(samePool))
+	if len(res.Arbs) != 0 || res.Block.Swaps != 2 || c.KnownBots() != 0 {
+		t.Fatalf("same-pool round trip classified as arbitrage: arbs=%+v swaps=%d", res.Arbs, res.Block.Swaps)
+	}
+
+	// The same flows split across two pools are an arbitrage.
+	twoPools := receipt(0, eoa, bot, 1,
+		v4Swap(manager, v4Pool, u(1e18), neg(3000e6)),
+		v3Swap(poolB, u(99e16), neg(3001e6), sqrtP3000), // pool takes 0.99 WETH, pays 3001 USDC
+	)
+	res = New(poolsWithV4(), newOracle(t)).Classify(block(twoPools))
+	if len(res.Arbs) != 1 {
+		t.Fatalf("arbs = %d, want 1", len(res.Arbs))
+	}
+	if a := res.Arbs[0]; a.ProfitTokens != 2 || a.ProfitToken != weth || a.Profit.Uint64() != 1e16 || a.Hops != 2 {
+		t.Fatalf("arb = %+v (profit %s)", a, a.Profit.Dec())
 	}
 }

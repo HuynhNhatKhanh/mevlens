@@ -102,7 +102,7 @@ free plan refuses batches over 3 requests).
 | `blocks` / `blocks_v` | one row per block (base fee, swaps, arbitrages, timeboosted txs, regime) |
 | `swaps` | every swap on a canonical pool (`pool_id`: address for v2/v3, PoolId for v4; `pool`: emitting contract) |
 | `arbitrages` / `arbitrages_v` | one row per arbitrage or reverted attempt (`profit_eth` sums every profitable token); the view adds `net_eth`, `bid_share` and hex addresses |
-| `pools` / `pools_v` | resolved pool metadata, including non-canonical (rejected) addresses; v4 rows carry `hooks` and `native` |
+| `pools` / `pools_v` | resolved pool metadata, including non-canonical (rejected) addresses; v4 rows carry `hooks`, `native` and `dynamic_fee` (hook-set fee: `fee_pips` is 0) |
 | `checkpoints` | last durable block per job |
 
 Find the Timeboost era from data (to fill `[regime]` in the config):
