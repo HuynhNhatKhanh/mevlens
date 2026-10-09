@@ -28,10 +28,11 @@ const userAgent = "mevlens-observatory/1 (+https://github.com/huynhnhatkhanh/mev
 
 // EndpointConfig describes one JSON-RPC provider.
 type EndpointConfig struct {
-	Name  string  // label used in logs and metrics; never contains secrets
-	URL   string  // may contain an API key; never logged
-	RPS   float64 // sustained requests per second (0 = unlimited)
-	Burst int     // token bucket size (defaults to max(1, ceil(RPS)))
+	Name     string  // label used in logs and metrics; never contains secrets
+	URL      string  // may contain an API key; never logged
+	RPS      float64 // sustained requests per second (0 = unlimited)
+	Burst    int     // token bucket size (defaults to max(1, ceil(RPS)))
+	MaxBatch int     // max requests per HTTP call to this endpoint (0 = Config.MaxBatch); can only lower it
 }
 
 // Config configures a Client.
@@ -71,9 +72,10 @@ type Client struct {
 }
 
 type endpoint struct {
-	name    string
-	url     string
-	limiter *rate.Limiter
+	name     string
+	url      string
+	limiter  *rate.Limiter
+	maxBatch int // some free plans refuse any batch larger than a few requests
 
 	mu            sync.Mutex
 	failures      int
@@ -130,7 +132,13 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 				burst = max(1, int(e.RPS+0.999))
 			}
 		}
-		c.endpoints = append(c.endpoints, &endpoint{name: name, url: e.URL, limiter: rate.NewLimiter(limit, max(1, burst))})
+		maxBatch := cfg.MaxBatch
+		if e.MaxBatch > 0 {
+			maxBatch = min(e.MaxBatch, maxBatch)
+		}
+		c.endpoints = append(c.endpoints, &endpoint{
+			name: name, url: e.URL, limiter: rate.NewLimiter(limit, max(1, burst)), maxBatch: maxBatch,
+		})
 	}
 	for _, o := range opts {
 		o(c)
@@ -168,7 +176,8 @@ func (c *Client) Call(ctx context.Context, result any, method string, params ...
 	return reqs[0].Err
 }
 
-// Batch executes reqs, splitting them into HTTP batches of at most MaxBatch.
+// Batch executes reqs, splitting them into HTTP batches of at most MaxBatch, or
+// the chosen endpoint's MaxBatch when it is lower.
 // The returned error is non-nil only when ctx is done; per-request outcomes
 // (including exhausted retries) are reported in reqs[i].Err.
 func (c *Client) Batch(ctx context.Context, reqs []Request) error {
@@ -181,14 +190,15 @@ func (c *Client) Batch(ctx context.Context, reqs []Request) error {
 	return nil
 }
 
-// outcome classifies the failures of one round trip.
+// outcome classifies the failures of one round trip. The order is precedence:
+// when the HTTP batches sent to one endpoint fail differently, the highest wins.
 type outcome uint8
 
 const (
 	outcomeDone      outcome = iota // nothing to retry
-	outcomeTransient                // retry after a backoff, possibly elsewhere
 	outcomeFailover                 // the endpoint lacks a method (remembered): try another now
 	outcomeSkip                     // the endpoint cannot serve this request (size, height): try another now
+	outcomeTransient                // retry after a backoff, possibly elsewhere
 )
 
 func (c *Client) batchWithRetry(ctx context.Context, reqs []Request) error {
@@ -223,7 +233,7 @@ func (c *Client) batchWithRetry(ctx context.Context, reqs []Request) error {
 			preferRefusals()
 			return nil // with skip, reqs[i].Err holds the refusal (e.g. the caller narrows a log range)
 		}
-		failed, kind := c.roundTrip(ctx, ep, reqs, pending)
+		failed, kind := c.roundTrips(ctx, ep, reqs, pending)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
@@ -261,9 +271,33 @@ func (c *Client) batchWithRetry(ctx context.Context, reqs []Request) error {
 	}
 }
 
-// roundTrip sends the pending requests to ep and returns the indexes that should
-// be retried, with the most severe failure kind.
-func (c *Client) roundTrip(ctx context.Context, ep *endpoint, reqs []Request, pending []int) (failed []int, kind outcome) {
+// roundTrips sends the pending requests to ep in consecutive HTTP batches of at
+// most ep.maxBatch and returns the indexes that should be retried, with the most
+// severe failure kind. A request one batch answered is not sent again because
+// another batch failed.
+func (c *Client) roundTrips(ctx context.Context, ep *endpoint, reqs []Request, pending []int) (failed []int, kind outcome) {
+	for len(pending) > 0 {
+		n := min(len(pending), ep.maxBatch)
+		f, k, fault := c.roundTrip(ctx, ep, reqs, pending[:n])
+		failed, kind, pending = append(failed, f...), max(kind, k), pending[n:]
+		if fault != nil {
+			// The endpoint failed a whole batch (a rate limit, a 5xx, a timeout,
+			// a done ctx): sending the rest would only add to its load. They fail
+			// with the same error, as they would have in one larger batch.
+			for _, i := range pending {
+				reqs[i].Err = fault
+			}
+			return append(failed, pending...), kind
+		}
+	}
+	return failed, kind
+}
+
+// roundTrip sends the pending requests to ep in one HTTP batch and returns the
+// indexes that should be retried, with the most severe failure kind. fault is
+// non-nil when the endpoint itself failed the batch; it is the error the
+// requests were given.
+func (c *Client) roundTrip(ctx context.Context, ep *endpoint, reqs []Request, pending []int) (failed []int, kind outcome, fault error) {
 	method := reqs[pending[0]].Method
 	if len(pending) > 1 {
 		method = "batch"
@@ -280,13 +314,13 @@ func (c *Client) roundTrip(ctx context.Context, ep *endpoint, reqs []Request, pe
 		m, single := singleMethod(reqs, pending)
 		switch {
 		case single && tooWide(m, err):
-			return pending, outcomeSkip
+			return pending, outcomeSkip, nil
 		case single && methodRefused(err):
 			// e.g. a free endpoint answering eth_getLogs with HTTP 403. Learn it
 			// (for a while) and fail over, but only when the refusal can be pinned
 			// on one method: a 403 to a mixed batch says nothing about which one.
 			ep.markUnsupported(m, refusedTTL)
-			return pending, outcomeFailover
+			return pending, outcomeFailover, nil
 		}
 		// Everything else (rate limits, auth or routing errors, malformed or
 		// oversized bodies) is a fault of this endpoint, not of the requests:
@@ -295,11 +329,12 @@ func (c *Client) roundTrip(ctx context.Context, ep *endpoint, reqs []Request, pe
 		// the whole batch keeps its own classification.
 		var re *Error
 		if !errors.As(err, &re) {
+			err = fmt.Errorf("%w: %w", ErrEndpoints, err)
 			for _, i := range pending {
-				reqs[i].Err = fmt.Errorf("%w: %w", ErrEndpoints, err)
+				reqs[i].Err = err
 			}
 		}
-		return pending, outcomeTransient
+		return pending, outcomeTransient, err
 	}
 	var transient, skipped, missing bool
 	for _, i := range pending {
@@ -332,13 +367,13 @@ func (c *Client) roundTrip(ctx context.Context, ep *endpoint, reqs []Request, pe
 	// refusals, then learned capability gaps.
 	switch {
 	case transient:
-		return failed, outcomeTransient
+		return failed, outcomeTransient, nil
 	case skipped:
-		return failed, outcomeSkip
+		return failed, outcomeSkip, nil
 	case missing:
-		return failed, outcomeFailover
+		return failed, outcomeFailover, nil
 	}
-	return failed, outcomeDone
+	return failed, outcomeDone, nil
 }
 
 // refusal reports an error meaning "this endpoint cannot serve this request" (a

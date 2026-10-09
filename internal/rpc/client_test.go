@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -33,11 +34,12 @@ type rpcResp struct {
 // fakeNode is a scriptable JSON-RPC server. handle is called once per request
 // object and may return a result or an error.
 type fakeNode struct {
-	t      *testing.T
-	mu     sync.Mutex
-	calls  [][]string // methods per HTTP round trip
-	status func(round int) int
-	handle func(round int, r rpcReq) (result string, rpcErr *Error)
+	t        *testing.T
+	mu       sync.Mutex
+	calls    [][]string // methods per HTTP round trip
+	maxBatch int        // larger batches get HTTP 500, as on dRPC's free plan (0 = no cap)
+	status   func(round int) int
+	handle   func(round int, r rpcReq) (result string, rpcErr *Error)
 }
 
 func (f *fakeNode) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -64,6 +66,11 @@ func (f *fakeNode) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.calls = append(f.calls, methods)
 	f.mu.Unlock()
 
+	if f.maxBatch > 0 && len(reqs) > f.maxBatch {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`[{"id":1,"jsonrpc":"2.0","error":{"message":"Batch of more than 3 requests are not allowed on free plan","code":31}}]`))
+		return
+	}
 	if f.status != nil {
 		if s := f.status(round); s != http.StatusOK {
 			w.WriteHeader(s)
@@ -745,5 +752,172 @@ func TestRefusalSurvivesOtherEndpointsFailing(t *testing.T) {
 		if !IsMissingState(q.Err) {
 			t.Errorf("reqs[%d].Err = %v, want the pruned-state refusal", i, q.Err)
 		}
+	}
+}
+
+// batchSizes records the batch size of every HTTP round trip.
+type batchSizes struct {
+	mu    sync.Mutex
+	sizes []int
+}
+
+func (b *batchSizes) ObserveRoundTrip(_, _ string, batch int, _ time.Duration, _ error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.sizes = append(b.sizes, batch)
+}
+
+// numbered returns n requests with the distinct methods m0, m1, ..., and the
+// results echo writes into.
+func numbered(n int) ([]Request, []string) {
+	reqs, out := make([]Request, n), make([]string, n)
+	for i := range reqs {
+		reqs[i] = Request{Method: "m" + strconv.Itoa(i), Result: &out[i]}
+	}
+	return reqs, out
+}
+
+func echo(_ int, r rpcReq) (string, *Error) { return `"` + r.Method + `"`, nil }
+
+func TestEndpointBatchCapSplitsBatches(t *testing.T) {
+	// Found on mainnet: dRPC's free plan answers any batch of more than 3
+	// requests with HTTP 500, so with max_batch = 50 every batch sent there
+	// failed and the endpoint only burnt retries and cooldowns.
+	node := &fakeNode{t: t, maxBatch: 3, handle: echo}
+	srv := httptest.NewServer(node)
+	defer srv.Close()
+	obs := &batchSizes{}
+	c, err := New(Config{
+		Endpoints:   []EndpointConfig{{URL: srv.URL, MaxBatch: 3}},
+		MaxBatch:    50,
+		BaseBackoff: time.Millisecond, MaxBackoff: 2 * time.Millisecond, MaxAttempts: 2,
+	}, WithObserver(obs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqs, out := numbered(10)
+	if err := c.Batch(context.Background(), reqs); err != nil {
+		t.Fatal(err)
+	}
+	for i, q := range reqs {
+		if q.Err != nil || out[i] != q.Method {
+			t.Fatalf("reqs[%d] = %q, %v", i, out[i], q.Err)
+		}
+	}
+	got := node.rounds()
+	want := [][]string{{"m0", "m1", "m2"}, {"m3", "m4", "m5"}, {"m6", "m7", "m8"}, {"m9"}}
+	if !slices.EqualFunc(got, want, slices.Equal) {
+		t.Fatalf("rounds = %v, want %v", got, want)
+	}
+	if want := []int{3, 3, 3, 1}; !slices.Equal(obs.sizes, want) {
+		t.Fatalf("observed batch sizes = %v, want one per HTTP round trip: %v", obs.sizes, want)
+	}
+}
+
+func TestEndpointBatchCapIsPerEndpoint(t *testing.T) {
+	capped := &fakeNode{t: t, maxBatch: 3, handle: echo}
+	wide := &fakeNode{t: t, handle: echo}
+	s1, s2 := httptest.NewServer(capped), httptest.NewServer(wide)
+	defer s1.Close()
+	defer s2.Close()
+	c, err := New(Config{
+		Endpoints:   []EndpointConfig{{URL: s1.URL, MaxBatch: 3}, {URL: s2.URL}},
+		MaxBatch:    50,
+		BaseBackoff: time.Millisecond, MaxBackoff: 2 * time.Millisecond, MaxAttempts: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 { // round-robin: one batch per endpoint
+		reqs, _ := numbered(10)
+		if err := c.Batch(context.Background(), reqs); err != nil {
+			t.Fatal(err)
+		}
+		for i, q := range reqs {
+			if q.Err != nil {
+				t.Fatalf("reqs[%d].Err = %v", i, q.Err)
+			}
+		}
+	}
+	sent := 0
+	for _, r := range capped.rounds() {
+		if len(r) > 3 {
+			t.Fatalf("capped endpoint got a batch of %d", len(r))
+		}
+		sent += len(r)
+	}
+	if w := wide.rounds(); sent != 10 || len(w) != 1 || len(w[0]) != 10 {
+		t.Fatalf("capped endpoint got %d requests, uncapped one %v; want 10 each, the latter in one batch", sent, w)
+	}
+}
+
+func TestEndpointBatchCapRetriesOnlyTheFailedBatch(t *testing.T) {
+	// A batch the endpoint fails (here HTTP 503) is retried with the batches
+	// not sent yet; the requests an earlier batch answered are not sent again.
+	node := &fakeNode{t: t, maxBatch: 3, handle: echo, status: func(round int) int {
+		if round == 1 {
+			return http.StatusServiceUnavailable
+		}
+		return http.StatusOK
+	}}
+	srv := httptest.NewServer(node)
+	defer srv.Close()
+	c, err := New(Config{
+		Endpoints:   []EndpointConfig{{URL: srv.URL, MaxBatch: 3}},
+		BaseBackoff: time.Millisecond, MaxBackoff: 2 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqs, out := numbered(7)
+	if err := c.Batch(context.Background(), reqs); err != nil {
+		t.Fatal(err)
+	}
+	for i, q := range reqs {
+		if q.Err != nil || out[i] != q.Method {
+			t.Fatalf("reqs[%d] = %q, %v", i, out[i], q.Err)
+		}
+	}
+	got := node.rounds()
+	want := [][]string{{"m0", "m1", "m2"}, {"m3", "m4", "m5"}, {"m3", "m4", "m5"}, {"m6"}}
+	if !slices.EqualFunc(got, want, slices.Equal) {
+		t.Fatalf("rounds = %v, want %v", got, want)
+	}
+}
+
+func TestForbiddenBatchPinsOnlyItsOwnMethod(t *testing.T) {
+	// Split by the endpoint's cap, a 403 to a batch of one method is pinned on
+	// that method only; the other batch is still served.
+	node := &fakeNode{t: t,
+		maxBatch: 2,
+		status: func(round int) int {
+			if round == 0 {
+				return http.StatusForbidden
+			}
+			return http.StatusOK
+		},
+		handle: func(int, rpcReq) (string, *Error) { return `"0x1"`, nil },
+	}
+	srv := httptest.NewServer(node)
+	defer srv.Close()
+	c, err := New(Config{
+		Endpoints:   []EndpointConfig{{URL: srv.URL, MaxBatch: 2}},
+		BaseBackoff: time.Hour, MaxBackoff: time.Hour, // no backoff may happen
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqs := []Request{{Method: "eth_getLogs"}, {Method: "eth_getLogs"}, {Method: "eth_call"}, {Method: "eth_call"}}
+	if err := c.Batch(context.Background(), reqs); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(reqs[0].Err, ErrUnsupported) || !errors.Is(reqs[1].Err, ErrUnsupported) {
+		t.Fatalf("eth_getLogs errs = %v, %v; want ErrUnsupported", reqs[0].Err, reqs[1].Err)
+	}
+	if reqs[2].Err != nil || reqs[3].Err != nil {
+		t.Fatalf("eth_call errs = %v, %v; want the other batch served", reqs[2].Err, reqs[3].Err)
+	}
+	if err := c.Call(context.Background(), nil, "eth_call"); err != nil {
+		t.Fatalf("eth_call after the 403 = %v; the method must stay usable", err)
 	}
 }

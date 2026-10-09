@@ -2,9 +2,12 @@ package config
 
 import (
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/huynhnhatkhanh/mevlens/internal/rpc"
 )
 
 func env(m map[string]string) func(string) (string, bool) {
@@ -85,6 +88,35 @@ url = "http://localhost"
 [pricing]
 weth = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
 `
+
+func TestEndpointMaxBatch(t *testing.T) {
+	withMaxBatch := func(n string) string {
+		return strings.Replace(minimal, `url = "http://localhost"`, `url = "http://localhost"`+"\nmax_batch = "+n, 1)
+	}
+	c, err := Parse(withMaxBatch("3"), env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.RPCConfig().Endpoints[0].MaxBatch; got != 3 {
+		t.Fatalf("endpoint max_batch = %d, want 3", got)
+	}
+	_, err = Parse(withMaxBatch("-1"), env(nil))
+	if err == nil || !strings.Contains(err.Error(), "rpc.endpoints[0].max_batch") {
+		t.Fatalf("negative max_batch not caught: %v", err)
+	}
+
+	raw, err := os.ReadFile("../../configs/arbitrum-one.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c, err = Parse(string(raw), testEnv); err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(c.RPCConfig().Endpoints, func(e rpc.EndpointConfig) bool { return e.Name == "drpc" })
+	if i < 0 || c.RPCConfig().Endpoints[i].MaxBatch != 3 {
+		t.Fatal("shipped drpc endpoint needs max_batch = 3: its free plan refuses larger batches")
+	}
+}
 
 func TestMinimalConfigGetsDefaults(t *testing.T) {
 	c, err := Parse(minimal, env(nil))
