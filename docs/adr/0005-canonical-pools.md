@@ -28,4 +28,7 @@ state is asked at `latest` instead.
 - Treating only reverts as final let any contract with a Swap-shaped log and a
   fallback hitting `INVALID` stall the pipeline at its block forever. Halts are
   now final too, and the pipeline bounds resolution retries per block
-  (`ResolveAttempts`), processing the block with unresolved pools skipped.
+  (`ResolveAttempts`), processing the block with unresolved pools skipped. Such
+  blocks may be incomplete: they are counted in `mevlens_resolve_skipped_blocks_total`
+  and the latest one is exported as `mevlens_resolve_skipped_last_block`, so they
+  can be found and re-ingested.

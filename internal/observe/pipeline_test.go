@@ -270,6 +270,14 @@ func (f *failingResolver) Resolve(context.Context, uint64, []dex.Candidate) erro
 
 func (*failingResolver) DrainNew() []dex.Pool { return nil }
 
+// skipMetrics records ResolveSkipped events.
+type skipMetrics struct {
+	NopMetrics
+	skipped []uint64
+}
+
+func (m *skipMetrics) ResolveSkipped(block uint64) { m.skipped = append(m.skipped, block) }
+
 func TestResolveFailureDoesNotHaltPipeline(t *testing.T) {
 	// Regression: resolution used to be retried forever, so one bad Swap emitter
 	// halted ingestion at its block, across restarts too.
@@ -285,7 +293,8 @@ func TestResolveFailureDoesNotHaltPipeline(t *testing.T) {
 			t.Fatal(err)
 		}
 		res := &failingResolver{}
-		p := New(Config{ResolveAttempts: 4}, chain, res, classify.New(reg, o), sink, nil, nil)
+		m := &skipMetrics{}
+		p := New(Config{ResolveAttempts: 4}, chain, res, classify.New(reg, o), sink, m, nil)
 
 		if err := p.Backfill(t.Context(), 1, 3, nil); err != nil {
 			t.Fatal(err)
@@ -295,6 +304,9 @@ func TestResolveFailureDoesNotHaltPipeline(t *testing.T) {
 		}
 		if n := res.calls.Load(); n != 12 {
 			t.Fatalf("resolve calls = %d, want 4 attempts x 3 blocks", n)
+		}
+		if !slices.Equal(m.skipped, seq(1, 3)) {
+			t.Fatalf("skipped blocks reported = %v, want 1..3: incomplete blocks must be visible", m.skipped)
 		}
 	})
 }

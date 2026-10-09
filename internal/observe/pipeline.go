@@ -444,6 +444,7 @@ func (p *Pipeline) resolve(ctx context.Context, n uint64, b *eth.Block) error {
 		}
 		if attempt+1 >= p.cfg.ResolveAttempts {
 			p.log.Error("pool resolution failed, skipping unresolved pools", "block", n, "attempts", attempt+1, "err", err)
+			p.m.ResolveSkipped(n)
 			return nil
 		}
 		p.log.Warn("pool resolution failed, retrying", "block", n, "attempt", attempt, "err", err)
