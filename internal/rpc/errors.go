@@ -199,7 +199,7 @@ func IsUnknownBlock(err error) bool {
 	if !errors.As(err, &re) {
 		return false
 	}
-	return containsAny(strings.ToLower(re.Message), "header not found", "unknown block", "block not found")
+	return containsAny(strings.ToLower(re.Message), "header not found", "header for hash not found", "unknown block", "block not found")
 }
 
 // IsMissingState reports whether the serving node has pruned the state needed to

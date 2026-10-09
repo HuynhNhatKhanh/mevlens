@@ -66,7 +66,7 @@ func inspect(ctx context.Context, configPath string, n uint64, dumpDir string, s
 		return err
 	}
 	cl := classify.New(reg, oracle, classify.WithRegime(cfg.RegimeFunc()))
-	if err := reg.Resolve(ctx, n, cl.Candidates(b)); err != nil {
+	if err := reg.Resolve(ctx, n, b.Header.Hash, cl.Candidates(b)); err != nil {
 		return err
 	}
 	res := cl.Classify(b)

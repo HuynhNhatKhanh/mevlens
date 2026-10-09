@@ -132,17 +132,18 @@ func (r *Registry) DrainNew() []dex.Pool {
 // Resolve resolves every unknown candidate. It returns an error only for transient
 // RPC failures, in which case nothing is cached and the caller should retry.
 //
-// v2/v3 pools are read at block, not at "latest": an endpoint lagging behind the
-// block being processed then fails ("header not found", retried elsewhere) instead
-// of answering from a state where a brand-new pool has no code yet, which would
-// cache it as not canonical forever. Immutables and factory mappings never change
-// once set, so when an endpoint has pruned that state (non-archive nodes during a
-// backfill) the pools are read at "latest" instead.
+// v2/v3 pools are read at the block being processed, pinned by its hash (EIP-1898)
+// when hash is not zero, never at "latest": an endpoint lagging behind the block,
+// or following another fork, then fails ("header not found", retried elsewhere)
+// instead of answering from a state where a brand-new pool has no code yet, which
+// would cache it as not canonical forever. Immutables and factory mappings never
+// change once set, so when an endpoint has pruned that state (non-archive nodes
+// during a backfill) the pools are read at "latest" instead.
 //
 // v4 pools are resolved from Initialize candidates only. A swap on a v4 pool that
 // is still unknown (initialized before the index sync) is left unresolved and not
 // cached, so classification skips it rather than guessing.
-func (r *Registry) Resolve(ctx context.Context, block uint64, cands []dex.Candidate) error {
+func (r *Registry) Resolve(ctx context.Context, block uint64, hash eth.Hash, cands []dex.Candidate) error {
 	var todo []dex.Candidate
 	seen := make(map[dex.PoolID]bool, len(cands))
 	for _, c := range cands {
@@ -163,7 +164,11 @@ func (r *Registry) Resolve(ctx context.Context, block uint64, cands []dex.Candid
 	if len(todo) == 0 {
 		return nil
 	}
-	pools, err := r.resolveAt(ctx, eth.FormatBlock(block), block, todo)
+	var at any = eth.FormatBlock(block)
+	if !hash.IsZero() {
+		at = rpc.BlockHash{Hash: hash}
+	}
+	pools, err := r.resolveAt(ctx, at, block, todo)
 	if rpc.IsMissingState(err) {
 		pools, err = r.resolveAt(ctx, rpc.Latest, block, todo)
 	}
@@ -196,8 +201,8 @@ func (r *Registry) addV4(p dex.Pool) {
 }
 
 // resolveAt reads the candidates' immutables and verifies them with their
-// factories, both at the given block tag.
-func (r *Registry) resolveAt(ctx context.Context, tag string, block uint64, todo []dex.Candidate) ([]dex.Pool, error) {
+// factories, both at the given block (a tag string or an rpc.BlockHash).
+func (r *Registry) resolveAt(ctx context.Context, tag any, block uint64, todo []dex.Candidate) ([]dex.Pool, error) {
 	pools, err := r.readImmutables(ctx, tag, block, todo)
 	if err != nil {
 		return nil, err
@@ -208,12 +213,12 @@ func (r *Registry) resolveAt(ctx context.Context, tag string, block uint64, todo
 	return pools, nil
 }
 
-func call(to eth.Address, data eth.Data, tag string, out *eth.Data) rpc.Request {
+func call(to eth.Address, data eth.Data, tag any, out *eth.Data) rpc.Request {
 	return rpc.NewCallMsg(rpc.CallMsg{To: to, Data: data, Gas: callGas}, tag, out)
 }
 
 // readImmutables reads factory(), token0(), token1() and, for v3, fee() of each candidate.
-func (r *Registry) readImmutables(ctx context.Context, tag string, block uint64, todo []dex.Candidate) ([]dex.Pool, error) {
+func (r *Registry) readImmutables(ctx context.Context, tag any, block uint64, todo []dex.Candidate) ([]dex.Pool, error) {
 	type slot struct{ factory, token0, token1, fee eth.Data }
 	slots := make([]slot, len(todo))
 	reqs := make([]rpc.Request, 0, 4*len(todo))
@@ -264,7 +269,7 @@ func (r *Registry) readImmutables(ctx context.Context, tag string, block uint64,
 }
 
 // verifyWithFactories marks pools canonical when their factory maps their tokens back to them.
-func (r *Registry) verifyWithFactories(ctx context.Context, tag string, pools []dex.Pool) error {
+func (r *Registry) verifyWithFactories(ctx context.Context, tag any, pools []dex.Pool) error {
 	var reqs []rpc.Request
 	var idx []int
 	answers := make([]eth.Data, len(pools))

@@ -42,7 +42,7 @@ type BlockSource interface {
 
 // Resolver resolves pool metadata. *registry.Registry implements it.
 type Resolver interface {
-	Resolve(ctx context.Context, block uint64, cands []dex.Candidate) error
+	Resolve(ctx context.Context, block uint64, hash eth.Hash, cands []dex.Candidate) error
 	DrainNew() []dex.Pool
 }
 
@@ -435,7 +435,7 @@ func (p *Pipeline) process(ctx context.Context, blocks <-chan *eth.Block, parent
 func (p *Pipeline) resolve(ctx context.Context, n uint64, b *eth.Block) error {
 	cands := p.cl.Candidates(b)
 	for attempt := 0; ; attempt++ {
-		err := p.reg.Resolve(ctx, n, cands)
+		err := p.reg.Resolve(ctx, n, b.Header.Hash, cands)
 		if err == nil {
 			return nil
 		}

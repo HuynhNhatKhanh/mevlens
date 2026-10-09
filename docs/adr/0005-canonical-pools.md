@@ -16,10 +16,11 @@ cap) counts as proof that an address is not a pool. Any other error (rate limit,
 an endpoint lacking `eth_call`, a node without the block) aborts resolution, so
 nothing wrong is cached.
 
-All calls are made at the block being processed, not at `latest`: a node lagging
-behind it then fails instead of answering from a state where a new pool has no
-code yet. Immutables never change once set, so an endpoint that has pruned that
-state is asked at `latest` instead.
+All calls are made at the block being processed, pinned by its hash (EIP-1898),
+not at `latest`: a node lagging behind it, or following another fork, then fails
+instead of answering from a state where a new pool has no code yet. Immutables
+never change once set, so when the endpoints have pruned that state it is read at
+`latest` instead.
 
 ## Consequences
 - Each address costs at most two batched round trips in its lifetime.

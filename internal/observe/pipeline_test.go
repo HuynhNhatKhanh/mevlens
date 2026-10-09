@@ -263,7 +263,7 @@ func TestSinkFailureStopsPipeline(t *testing.T) {
 // failing in a way the registry cannot classify.
 type failingResolver struct{ calls atomic.Int32 }
 
-func (f *failingResolver) Resolve(context.Context, uint64, []dex.Candidate) error {
+func (f *failingResolver) Resolve(context.Context, uint64, eth.Hash, []dex.Candidate) error {
 	f.calls.Add(1)
 	return errors.New("registry: resolve pools: boom")
 }

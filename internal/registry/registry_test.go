@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"testing"
 
@@ -15,10 +16,10 @@ type fakeChain struct {
 	answers map[string]eth.Data
 	calls   int
 	failAll error
-	failTo  map[eth.Address]error  // per-contract eth_call error
-	failTag func(tag string) error // per-block-tag eth_call error
-	tags    []string               // block tag of every eth_call
-	msgs    []rpc.CallMsg          // call object of every eth_call
+	failTo  map[eth.Address]error // per-contract eth_call error
+	failTag func(tag any) error   // per-block-tag eth_call error
+	tags    []any                 // block parameter of every eth_call
+	msgs    []rpc.CallMsg         // call object of every eth_call
 	logs    func(rpc.LogQuery) ([]eth.Log, error)
 }
 
@@ -43,7 +44,7 @@ func (f *fakeChain) Batch(_ context.Context, reqs []rpc.Request) error {
 			continue
 		}
 		msg := reqs[i].Params[0].(rpc.CallMsg)
-		tag := reqs[i].Params[1].(string)
+		tag := reqs[i].Params[1]
 		f.tags, f.msgs = append(f.tags, tag), append(f.msgs, msg)
 		if f.failTag != nil {
 			if err := f.failTag(tag); err != nil {
@@ -116,7 +117,7 @@ func TestResolveCanonicalAndHoneypot(t *testing.T) {
 	chain := newChain()
 	r := newRegistry(t, chain)
 	notAPool := eth.MustAddress("0x0000000000000000000000000000000000000b04")
-	err := r.Resolve(context.Background(), 100, []dex.Candidate{
+	err := r.Resolve(context.Background(), 100, eth.Hash{}, []dex.Candidate{
 		cand(pairV2, dex.KindV2), cand(poolV3, dex.KindV3), cand(honeypot, dex.KindV2), cand(notAPool, dex.KindV2),
 		cand(pairV2, dex.KindV2), // duplicate in the same batch
 	})
@@ -154,7 +155,7 @@ func TestResolveCanonicalAndHoneypot(t *testing.T) {
 	}
 
 	calls := chain.calls
-	if err := r.Resolve(context.Background(), 101, []dex.Candidate{cand(pairV2, dex.KindV2), cand(honeypot, dex.KindV2)}); err != nil {
+	if err := r.Resolve(context.Background(), 101, eth.Hash{}, []dex.Candidate{cand(pairV2, dex.KindV2), cand(honeypot, dex.KindV2)}); err != nil {
 		t.Fatal(err)
 	}
 	if chain.calls != calls {
@@ -165,7 +166,7 @@ func TestResolveCanonicalAndHoneypot(t *testing.T) {
 func TestKindMismatchIsNotCanonical(t *testing.T) {
 	// A v3-shaped Swap log from a genuine v2 pair cannot be trusted.
 	r := newRegistry(t, newChain())
-	if err := r.Resolve(context.Background(), 1, []dex.Candidate{cand(pairV2, dex.KindV3)}); err != nil {
+	if err := r.Resolve(context.Background(), 1, eth.Hash{}, []dex.Candidate{cand(pairV2, dex.KindV3)}); err != nil {
 		t.Fatal(err)
 	}
 	if p, _ := r.Lookup(dex.PoolIDFromAddress(pairV2)); p.Canonical {
@@ -177,7 +178,7 @@ func TestTransientErrorCachesNothing(t *testing.T) {
 	chain := newChain()
 	chain.failAll = &rpc.HTTPError{Status: 429}
 	r := newRegistry(t, chain)
-	err := r.Resolve(context.Background(), 1, []dex.Candidate{cand(pairV2, dex.KindV2)})
+	err := r.Resolve(context.Background(), 1, eth.Hash{}, []dex.Candidate{cand(pairV2, dex.KindV2)})
 	var he *rpc.HTTPError
 	if !errors.As(err, &he) {
 		t.Fatalf("err = %v, want transient HTTP error", err)
@@ -214,7 +215,7 @@ func TestOnlyRevertsAreCachedAsNotAPool(t *testing.T) {
 	chain := newChain()
 	chain.failAll = &rpc.Error{Code: -32000, Message: "The method eth_call is not supported."}
 	r := newRegistry(t, chain)
-	if err := r.Resolve(context.Background(), 1, []dex.Candidate{cand(pairV2, dex.KindV2)}); err == nil {
+	if err := r.Resolve(context.Background(), 1, eth.Hash{}, []dex.Candidate{cand(pairV2, dex.KindV2)}); err == nil {
 		t.Fatal("non-revert error must fail the resolution")
 	}
 	if _, ok := r.Lookup(dex.PoolIDFromAddress(pairV2)); ok {
@@ -230,7 +231,7 @@ func TestExecutionFailureIsNotAPool(t *testing.T) {
 		chain := newChain()
 		chain.failTo = map[eth.Address]error{honeypot: &rpc.Error{Code: -32000, Message: vmErr}}
 		r := newRegistry(t, chain)
-		err := r.Resolve(context.Background(), 1, []dex.Candidate{cand(honeypot, dex.KindV2), cand(pairV2, dex.KindV2)})
+		err := r.Resolve(context.Background(), 1, eth.Hash{}, []dex.Candidate{cand(honeypot, dex.KindV2), cand(pairV2, dex.KindV2)})
 		if err != nil {
 			t.Fatalf("%s: Resolve = %v, want the failing contract classified as not a pool", vmErr, err)
 		}
@@ -246,21 +247,56 @@ func TestExecutionFailureIsNotAPool(t *testing.T) {
 func TestCallsArePinnedToTheBlock(t *testing.T) {
 	// Regression: calls at "latest" on an endpoint lagging behind the processed
 	// block saw a brand-new pool without code and cached it as not canonical.
-	chain := newChain()
-	r := newRegistry(t, chain)
-	if err := r.Resolve(context.Background(), 123, []dex.Candidate{cand(pairV2, dex.KindV2)}); err != nil {
+	// Pinning by number alone still let a node on another fork answer from a
+	// state without the pool, so the hash is used when known.
+	hash := eth.Keccak256([]byte("block 123"))
+	for _, tt := range []struct {
+		hash eth.Hash
+		want any
+	}{
+		{hash, rpc.BlockHash{Hash: hash}},
+		{eth.Hash{}, eth.FormatBlock(123)},
+	} {
+		chain := newChain()
+		r := newRegistry(t, chain)
+		if err := r.Resolve(context.Background(), 123, tt.hash, []dex.Candidate{cand(pairV2, dex.KindV2)}); err != nil {
+			t.Fatal(err)
+		}
+		if len(chain.tags) == 0 {
+			t.Fatal("no eth_call made")
+		}
+		for i, tag := range chain.tags {
+			if tag != tt.want {
+				t.Fatalf("call %d at %v, want %v", i, tag, tt.want)
+			}
+			if chain.msgs[i].Gas != callGas {
+				t.Fatalf("call %d gas = %d, want the cap %d", i, chain.msgs[i].Gas, callGas)
+			}
+		}
+	}
+}
+
+func TestBlockHashParam(t *testing.T) {
+	b, err := json.Marshal(rpc.BlockHash{Hash: eth.Keccak256([]byte("x"))})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(chain.tags) == 0 {
-		t.Fatal("no eth_call made")
+	if want := `{"blockHash":"` + eth.Keccak256([]byte("x")).Hex() + `"}`; string(b) != want {
+		t.Fatalf("BlockHash = %s, want the EIP-1898 object %s", b, want)
 	}
-	for i, tag := range chain.tags {
-		if tag != eth.FormatBlock(123) {
-			t.Fatalf("call %d at %q, want the processed block 0x7b", i, tag)
-		}
-		if chain.msgs[i].Gas != callGas {
-			t.Fatalf("call %d gas = %d, want the cap %d", i, chain.msgs[i].Gas, callGas)
-		}
+}
+
+func TestUnknownBlockHashCachesNothing(t *testing.T) {
+	// A node following another fork does not know the hash: nothing is cached.
+	chain := newChain()
+	chain.failAll = &rpc.Error{Code: -32000, Message: "header for hash not found"}
+	r := newRegistry(t, chain)
+	err := r.Resolve(context.Background(), 1, eth.Keccak256([]byte("orphan")), []dex.Candidate{cand(pairV2, dex.KindV2)})
+	if err == nil || !rpc.IsUnknownBlock(err) {
+		t.Fatalf("Resolve = %v, want an unknown-block failure", err)
+	}
+	if _, ok := r.Lookup(dex.PoolIDFromAddress(pairV2)); ok {
+		t.Fatal("pool cached although the node did not have the block")
 	}
 }
 
@@ -268,7 +304,7 @@ func TestLaggingEndpointCachesNothing(t *testing.T) {
 	chain := newChain()
 	chain.failAll = &rpc.Error{Code: -32000, Message: "header not found"}
 	r := newRegistry(t, chain)
-	if err := r.Resolve(context.Background(), 1, []dex.Candidate{cand(pairV2, dex.KindV2)}); err == nil {
+	if err := r.Resolve(context.Background(), 1, eth.Hash{}, []dex.Candidate{cand(pairV2, dex.KindV2)}); err == nil {
 		t.Fatal("a node without the block must fail the resolution")
 	}
 	if _, ok := r.Lookup(dex.PoolIDFromAddress(pairV2)); ok {
@@ -278,14 +314,14 @@ func TestLaggingEndpointCachesNothing(t *testing.T) {
 
 func TestPrunedStateFallsBackToLatest(t *testing.T) {
 	chain := newChain()
-	chain.failTag = func(tag string) error {
+	chain.failTag = func(tag any) error {
 		if tag != rpc.Latest {
 			return &rpc.Error{Code: -32000, Message: "historical state 79ff2b is not available"}
 		}
 		return nil
 	}
 	r := newRegistry(t, chain)
-	if err := r.Resolve(context.Background(), 1, []dex.Candidate{cand(pairV2, dex.KindV2)}); err != nil {
+	if err := r.Resolve(context.Background(), 1, eth.Hash{}, []dex.Candidate{cand(pairV2, dex.KindV2)}); err != nil {
 		t.Fatal(err)
 	}
 	if p, ok := r.Lookup(dex.PoolIDFromAddress(pairV2)); !ok || !p.Canonical {
@@ -327,7 +363,7 @@ func TestV4PoolsFromInitializeCandidates(t *testing.T) {
 	p, _ := dex.DecodeV4Initialize(&l)
 	l2 := initLog(spoofed, eth.MustAddress("0x00000000000000000000000000000000000000ff"), 150)
 	q, _ := dex.DecodeV4Initialize(&l2)
-	err := r.Resolve(context.Background(), 150, []dex.Candidate{
+	err := r.Resolve(context.Background(), 150, eth.Hash{}, []dex.Candidate{
 		{ID: dex.PoolID(unknownSwap), Contract: manager, Kind: dex.KindV4}, // swap on a pool we never saw initialized
 		{ID: p.ID, Contract: manager, Kind: dex.KindV4, Init: &p},
 		{ID: q.ID, Contract: q.Contract, Kind: dex.KindV4, Init: &q}, // Initialize-shaped log from another contract
