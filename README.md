@@ -176,7 +176,7 @@ make monitoring-check  # Prometheus/Alertmanager configs + alert rule unit tests
 
 ## Known limitations
 
-- **Venues not decoded yet:** PancakeSwap v3, Algebra/Camelot v3, Balancer and Curve. Arbitrage with a leg on them is missed or partial. Uniswap v4 is supported ([ADR 0007](docs/adr/0007-uniswap-v4.md)).
+- **Venues not decoded yet:** Balancer and Curve (PancakeSwap v3 and Camelot v3 / Algebra are). Arbitrage with a leg on them is missed or partial. Uniswap v4 is supported ([ADR 0007](docs/adr/0007-uniswap-v4.md)).
 - Uniswap v4 hooks that return deltas can make the pool-side amounts differ slightly from what the trader paid. Hooked pools are flagged (`pools.hooks`), not excluded.
 - Profit is valued in ETH only when the profit token is WETH or a configured USD stablecoin. The dashboard reports valuation coverage.
 - Reverted attempts are attributed only to contracts that previously completed a detected arbitrage.

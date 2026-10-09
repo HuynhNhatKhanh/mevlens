@@ -17,6 +17,8 @@ func TestTopicsMatchPublishedValues(t *testing.T) {
 		"v2 Swap": {TopicV2Swap, "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"},
 		"v2 Sync": {TopicV2Sync, "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"},
 		"v3 Swap": {TopicV3Swap, "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"},
+		// Observed on Arbitrum One from PancakeSwap v3 pools (factory 0x0BFbCF9f…1865).
+		"PancakeSwap v3 Swap": {TopicPancakeV3Swap, "0x19b47279256b2a23a1665c810c8d55a1758940ee09377d4f8d26497a3577dc83"},
 	}
 	for name, tt := range tests {
 		if tt.got.Hex() != tt.want {
@@ -87,13 +89,36 @@ func TestDecodeV3SwapNegativeAmounts(t *testing.T) {
 	}
 }
 
+func TestDecodePancakeV3Swap(t *testing.T) {
+	// Same amounts and signs as Uniswap v3; the two trailing protocol-fee words are
+	// not part of the pool-side flow.
+	l := &eth.Log{
+		Address: pool,
+		Topics:  []eth.Hash{TopicPancakeV3Swap, {}, {}},
+		Data:    concat(word(-1234), word(500_000_000_000_000_000), word(79228162514264337), word(1), word(-5), word(7), word(9)),
+	}
+	s, ok := DecodeSwap(l)
+	if !ok || s.Kind != KindV3 || KindOfTopic(l.Topics[0]) != KindV3 || s.Pool != PoolIDFromAddress(pool) {
+		t.Fatalf("decode = %+v, %v", s, ok)
+	}
+	if s.Out0.Uint64() != 1234 || !s.In0.IsZero() || s.In1.Uint64() != 500_000_000_000_000_000 || !s.Out1.IsZero() {
+		t.Fatalf("amounts: in0=%s out0=%s in1=%s out1=%s", s.In0.Dec(), s.Out0.Dec(), s.In1.Dec(), s.Out1.Dec())
+	}
+	if s.SqrtPriceX96.Uint64() != 79228162514264337 {
+		t.Fatalf("sqrtPrice = %s", s.SqrtPriceX96.Dec())
+	}
+}
+
 func TestDecodeRejectsMalformed(t *testing.T) {
 	cases := map[string]*eth.Log{
 		"wrong topic":     {Topics: []eth.Hash{TopicV2Sync, {}, {}}, Data: make([]byte, 128)},
 		"short v2 data":   {Topics: []eth.Hash{TopicV2Swap, {}, {}}, Data: make([]byte, 96)},
 		"v3 topic v2 len": {Topics: []eth.Hash{TopicV3Swap, {}, {}}, Data: make([]byte, 128)},
-		"missing topics":  {Topics: []eth.Hash{TopicV2Swap}, Data: make([]byte, 128)},
-		"removed":         {Topics: []eth.Hash{TopicV2Swap, {}, {}}, Data: make([]byte, 128), Removed: true},
+		// Each v3 topic only with its own data length.
+		"v3 topic pancake len": {Topics: []eth.Hash{TopicV3Swap, {}, {}}, Data: make([]byte, 224)},
+		"pancake topic v3 len": {Topics: []eth.Hash{TopicPancakeV3Swap, {}, {}}, Data: make([]byte, 160)},
+		"missing topics":       {Topics: []eth.Hash{TopicV2Swap}, Data: make([]byte, 128)},
+		"removed":              {Topics: []eth.Hash{TopicV2Swap, {}, {}}, Data: make([]byte, 128), Removed: true},
 	}
 	for name, l := range cases {
 		if _, ok := DecodeSwap(l); ok {

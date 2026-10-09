@@ -63,6 +63,19 @@ name = "sushi-v3"
 kind = "v3"
 address = "0x1af415a1EbA07a4986a52B6f2e7dE7003D82231e"
 
+# PancakeSwap v3: Uniswap v3 lookup (getPool with a fee tier), its own Swap event.
+[[dex.factories]]
+name = "pancake-v3"
+kind = "v3"
+address = "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865"
+
+# Camelot v3 is Algebra: the Uniswap v3 Swap event, but no fee tiers (the fee is
+# dynamic), so pools are verified with poolByPair(token0, token1).
+[[dex.factories]]
+name = "camelot-v3"
+kind = "algebra"
+address = "0x1a3c9B1d2F0529D97f2afC5136Cc23e58f1FD35B"
+
 # Uniswap v4 singleton PoolManager. start_block is the first Initialize log on
 # Arbitrum One (verified 2026-10-08); pools are indexed from there once at startup.
 [[dex.factories]]

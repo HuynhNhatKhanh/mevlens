@@ -27,7 +27,7 @@ func TestShippedConfigIsValid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Chain.ChainID != 42161 || len(c.RPC.Endpoints) < 2 || len(c.Factories()) != 6 {
+	if c.Chain.ChainID != 42161 || len(c.RPC.Endpoints) < 2 || len(c.Factories()) != 8 {
 		t.Fatalf("unexpected config: %+v", c.Chain)
 	}
 	if c.RPC.Timeout != 15*time.Second || c.Pipeline.PollInterval != 250*time.Millisecond {
@@ -36,8 +36,12 @@ func TestShippedConfigIsValid(t *testing.T) {
 	if c.ClickHouse.Password != "secret" {
 		t.Fatal("environment not expanded")
 	}
-	if f, ok := c.Factory("uniswap-v3"); !ok || f.Kind.String() != "v3" {
+	if f, ok := c.Factory("uniswap-v3"); !ok || f.Kind.String() != "v3" || f.Algebra {
 		t.Fatalf("factory lookup = %+v", f)
+	}
+	// kind = "algebra" is a v3 factory looked up by pair.
+	if f, ok := c.Factory("camelot-v3"); !ok || f.Kind.String() != "v3" || !f.Algebra {
+		t.Fatalf("algebra factory = %+v", f)
 	}
 }
 
@@ -90,7 +94,7 @@ log_format = "xml"
 	if err == nil {
 		t.Fatal("expected errors")
 	}
-	for _, want := range []string{"chain_id", "rpc.endpoints", "kind must be v2, v3 or v4", "v4 requires start_block", "pricing.weth", "log_format"} {
+	for _, want := range []string{"chain_id", "rpc.endpoints", "kind must be v2, v3, algebra or v4", "v4 requires start_block", "pricing.weth", "log_format"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("missing %q in: %v", want, err)
 		}

@@ -4,6 +4,8 @@
 // that).
 //   - v2/v3: a pool is canonical only if a configured factory, asked for the pool
 //     of the pool's own (token0, token1[, fee]), answers with the pool's address.
+//     Algebra factories (Camelot v3) have no fee tiers and are asked
+//     poolByPair(token0, token1) instead.
 //     Results (positive and negative) are cached, so each address costs two batched
 //     round trips at most once in its lifetime.
 //   - v4: pools live inside a singleton PoolManager and are identified by a bytes32
@@ -31,6 +33,10 @@ type Factory struct {
 	Address    eth.Address
 	Kind       dex.Kind
 	StartBlock uint64 // v4: first block to scan for Initialize logs
+	// Algebra marks a v3 factory of Algebra pools (Camelot v3). They emit the
+	// Uniswap v3 Swap event but have no fee tier (fee() reverts; the fee is set per
+	// swap), so they are looked up with poolByPair(token0, token1).
+	Algebra bool
 }
 
 // Caller is the subset of *rpc.Client the registry needs.
@@ -46,6 +52,8 @@ var (
 	selFee     = eth.NewSelector("fee()")
 	selGetPair = eth.NewSelector("getPair(address,address)")
 	selGetPool = eth.NewSelector("getPool(address,address,uint24)")
+	// Algebra factories: one pool per token pair.
+	selPoolByPair = eth.NewSelector("poolByPair(address,address)")
 )
 
 // callGas caps every eth_call to a candidate pool or factory. The getters cost a
@@ -82,6 +90,9 @@ func New(caller Caller, factories []Factory, nativeAlias eth.Address) (*Registry
 		}
 		if _, dup := r.managers[f.Address]; dup {
 			return nil, fmt.Errorf("registry: duplicate factory %s", f.Address)
+		}
+		if f.Algebra && f.Kind != dex.KindV3 {
+			return nil, fmt.Errorf("registry: Algebra factory %s must be of kind v3", f.Name)
 		}
 		switch f.Kind {
 		case dex.KindV2, dex.KindV3:
@@ -225,6 +236,7 @@ func (r *Registry) readImmutables(ctx context.Context, tag any, block uint64, to
 	type slot struct{ factory, token0, token1, fee eth.Data }
 	slots := make([]slot, len(todo))
 	reqs := make([]rpc.Request, 0, 4*len(todo))
+	feeCalls := make(map[int]bool) // indexes in reqs of the fee() calls
 	for i, c := range todo {
 		s := &slots[i]
 		reqs = append(reqs,
@@ -233,6 +245,7 @@ func (r *Registry) readImmutables(ctx context.Context, tag any, block uint64, to
 			call(c.Contract, selToken1.Calldata(), tag, &s.token1),
 		)
 		if c.Kind == dex.KindV3 {
+			feeCalls[len(reqs)] = true
 			reqs = append(reqs, call(c.Contract, selFee.Calldata(), tag, &s.fee))
 		}
 	}
@@ -242,16 +255,22 @@ func (r *Registry) readImmutables(ctx context.Context, tag any, block uint64, to
 	// Only a failure inside the EVM (a revert, an invalid opcode, out of gas, ...)
 	// proves "not a pool": it is a property of the contract. Any other error (rate
 	// limits, an endpoint lacking eth_call, ...) aborts the resolution so nothing
-	// wrong is cached; the caller retries.
+	// wrong is cached; the caller retries. A reverting fee() alone is not proof:
+	// Algebra pools have none, and leave the verdict to their factory.
 	failed := make(map[eth.Address]bool)
-	for _, q := range reqs {
+	noFee := make(map[eth.Address]bool)
+	for k, q := range reqs {
 		if q.Err == nil {
 			continue
 		}
 		if !rpc.IsExecutionError(q.Err) {
 			return nil, fmt.Errorf("registry: resolve pools at block %d: %w", block, q.Err)
 		}
-		failed[q.Params[0].(rpc.CallMsg).To] = true
+		if to := q.Params[0].(rpc.CallMsg).To; feeCalls[k] {
+			noFee[to] = true
+		} else {
+			failed[to] = true
+		}
 	}
 
 	pools := make([]dex.Pool, len(todo))
@@ -262,7 +281,7 @@ func (r *Registry) readImmutables(ctx context.Context, tag any, block uint64, to
 			p.Factory, _ = wordAddress(s.factory)
 			p.Token0, _ = wordAddress(s.token0)
 			p.Token1, _ = wordAddress(s.token1)
-			if c.Kind == dex.KindV3 {
+			if c.Kind == dex.KindV3 && !noFee[c.Contract] {
 				p.FeePips = wordUint24(s.fee)
 			}
 		}
@@ -283,9 +302,12 @@ func (r *Registry) verifyWithFactories(ctx context.Context, tag any, pools []dex
 			continue
 		}
 		var data eth.Data
-		if p.Kind == dex.KindV2 {
+		switch {
+		case p.Kind == dex.KindV2:
 			data = selGetPair.Calldata(p.Token0.Word(), p.Token1.Word())
-		} else {
+		case f.Algebra:
+			data = selPoolByPair.Calldata(p.Token0.Word(), p.Token1.Word())
+		default:
 			data = selGetPool.Calldata(p.Token0.Word(), p.Token1.Word(), eth.Uint64Word(uint64(p.FeePips)))
 		}
 		reqs = append(reqs, call(f.Address, data, tag, &answers[i]))
@@ -306,8 +328,12 @@ func (r *Registry) verifyWithFactories(ctx context.Context, tag any, pools []dex
 			continue
 		}
 		if got, ok := wordAddress(answers[i]); ok && got == pools[i].Contract {
+			f := r.factories[pools[i].Factory]
 			pools[i].Canonical = true
-			pools[i].Venue = r.factories[pools[i].Factory].Name
+			pools[i].Venue = f.Name
+			if f.Algebra { // the fee is set per swap: there is no tier to record
+				pools[i].FeePips, pools[i].DynamicFee = 0, true
+			}
 		}
 	}
 	return nil

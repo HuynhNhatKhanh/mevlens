@@ -470,3 +470,57 @@ func TestUntrustedInitializeDoesNotShadowGenuineCandidates(t *testing.T) {
 		t.Fatalf("v2 pair = %+v, %v; want canonical", got, ok)
 	}
 }
+
+func TestAlgebraPoolsAreLookedUpByPair(t *testing.T) {
+	// Regression: Camelot v3 (Algebra) pools emit the Uniswap v3 Swap event but
+	// have no fee(); the revert cached every one of them as "not a pool".
+	algebraFactory := eth.MustAddress("0x00000000000000000000000000000000000000a3")
+	algebraPool := eth.MustAddress("0x0000000000000000000000000000000000000b05")
+	impostor := eth.MustAddress("0x0000000000000000000000000000000000000b06")
+	feeless := eth.MustAddress("0x0000000000000000000000000000000000000b07")
+	chain := newChain()
+	for _, p := range []eth.Address{algebraPool, impostor} { // no fee() answer: it reverts
+		chain.set(p, selFactory.Calldata(), algebraFactory.Word())
+		chain.set(p, selToken0.Calldata(), weth.Word())
+		chain.set(p, selToken1.Calldata(), usdc.Word())
+	}
+	chain.set(algebraFactory, selPoolByPair.Calldata(weth.Word(), usdc.Word()), algebraPool.Word())
+	// A pool claiming the Uniswap v3 factory without a fee() is not canonical there.
+	chain.set(feeless, selFactory.Calldata(), v3Factory.Word())
+	chain.set(feeless, selToken0.Calldata(), weth.Word())
+	chain.set(feeless, selToken1.Calldata(), usdc.Word())
+
+	r, err := New(chain, []Factory{
+		{Name: "uniswap-v3", Address: v3Factory, Kind: dex.KindV3},
+		{Name: "camelot-v3", Address: algebraFactory, Kind: dex.KindV3, Algebra: true},
+	}, weth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = r.Resolve(context.Background(), 1, eth.Hash{}, []dex.Candidate{
+		cand(algebraPool, dex.KindV3), cand(impostor, dex.KindV3), cand(feeless, dex.KindV3), cand(poolV3, dex.KindV3),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, ok := r.Lookup(dex.PoolIDFromAddress(algebraPool)); !ok || !p.Canonical || p.Venue != "camelot-v3" ||
+		!p.DynamicFee || p.FeePips != 0 || p.Token0 != weth || p.Token1 != usdc {
+		t.Fatalf("algebra pool = %+v, %v", p, ok)
+	}
+	for _, a := range []eth.Address{impostor, feeless} {
+		if p, ok := r.Lookup(dex.PoolIDFromAddress(a)); !ok || p.Canonical {
+			t.Fatalf("%s = %+v, %v; want cached as not canonical", a, p, ok)
+		}
+	}
+	if p, ok := r.Lookup(dex.PoolIDFromAddress(poolV3)); !ok || !p.Canonical || p.FeePips != 500 || p.DynamicFee {
+		t.Fatalf("uniswap v3 pool next to them = %+v, %v", p, ok)
+	}
+	// The fee() revert alone was not proof: the pool's other getters were read.
+	if p, _ := r.Lookup(dex.PoolIDFromAddress(feeless)); p.Factory != v3Factory || p.Token0 != weth {
+		t.Fatalf("feeless pool immutables = %+v", p)
+	}
+
+	if _, err := New(chain, []Factory{{Name: "x", Address: algebraFactory, Kind: dex.KindV2, Algebra: true}}, weth); err == nil {
+		t.Fatal("an Algebra factory of kind v2 must be rejected")
+	}
+}

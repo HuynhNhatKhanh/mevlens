@@ -19,7 +19,7 @@ type Kind uint8
 const (
 	KindUnknown Kind = iota
 	KindV2           // constant product (Uniswap v2 and forks: Sushi, Camelot)
-	KindV3           // concentrated liquidity (Uniswap v3 and forks: Sushi v3)
+	KindV3           // concentrated liquidity (Uniswap v3 and forks: Sushi v3, PancakeSwap v3, Algebra/Camelot v3)
 	KindV4           // singleton PoolManager (Uniswap v4)
 )
 
@@ -62,6 +62,9 @@ var (
 	TopicV2Swap = eth.EventTopic("Swap(address,uint256,uint256,uint256,uint256,address)")
 	TopicV2Sync = eth.EventTopic("Sync(uint112,uint112)")
 	TopicV3Swap = eth.EventTopic("Swap(address,address,int256,int256,uint160,uint128,int24)")
+	// PancakeSwap v3 appends the protocol fees to the v3 event. Algebra pools
+	// (Camelot v3) emit the v3 event itself; only their factory lookup differs.
+	TopicPancakeV3Swap = eth.EventTopic("Swap(address,address,int256,int256,uint160,uint128,int24,uint128,uint128)")
 
 	// Uniswap v4 PoolManager events; PoolId and Currency are bytes32 and address.
 	TopicV4Swap       = eth.EventTopic("Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)")
@@ -73,7 +76,7 @@ func KindOfTopic(topic0 eth.Hash) Kind {
 	switch topic0 {
 	case TopicV2Swap:
 		return KindV2
-	case TopicV3Swap:
+	case TopicV3Swap, TopicPancakeV3Swap:
 		return KindV3
 	case TopicV4Swap:
 		return KindV4
@@ -100,11 +103,13 @@ type Swap struct {
 const (
 	v2SwapDataLen = 4 * eth.HashLength // amount0In, amount1In, amount0Out, amount1Out
 	v3SwapDataLen = 5 * eth.HashLength // amount0, amount1, sqrtPriceX96, liquidity, tick
-	v4SwapDataLen = 6 * eth.HashLength // amount0, amount1, sqrtPriceX96, liquidity, tick, fee
-	v4InitDataLen = 5 * eth.HashLength // fee, tickSpacing, hooks, sqrtPriceX96, tick
+	// PancakeSwap v3: the v3 fields, then protocolFeesToken0, protocolFeesToken1.
+	pancakeV3SwapDataLen = 7 * eth.HashLength
+	v4SwapDataLen        = 6 * eth.HashLength // amount0, amount1, sqrtPriceX96, liquidity, tick, fee
+	v4InitDataLen        = 5 * eth.HashLength // fee, tickSpacing, hooks, sqrtPriceX96, tick
 )
 
-// DecodeSwap decodes a v2, v3 or v4 Swap log. It returns false for any other log
+// DecodeSwap decodes a v2, v3 (including PancakeSwap v3) or v4 Swap log. It returns false for any other log
 // or for a log whose shape does not match the event ABI.
 func DecodeSwap(l *eth.Log) (Swap, bool) {
 	var s Swap
@@ -124,8 +129,12 @@ func DecodeSwap(l *eth.Log) (Swap, bool) {
 		s.In1.SetBytes32(l.Data[32:64])
 		s.Out0.SetBytes32(l.Data[64:96])
 		s.Out1.SetBytes32(l.Data[96:128])
-	case TopicV3Swap:
-		if len(l.Data) != v3SwapDataLen {
+	case TopicV3Swap, TopicPancakeV3Swap:
+		want := v3SwapDataLen
+		if l.Topics[0] == TopicPancakeV3Swap {
+			want = pancakeV3SwapDataLen
+		}
+		if len(l.Data) != want {
 			return s, false
 		}
 		s.Kind = KindV3
