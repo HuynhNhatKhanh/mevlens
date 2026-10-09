@@ -48,6 +48,11 @@ var (
 	selGetPool = eth.NewSelector("getPool(address,address,uint24)")
 )
 
+// callGas caps every eth_call to a candidate pool or factory. The getters cost a
+// few thousand gas; the cap turns a contract that loops forever into a fast,
+// deterministic out-of-gas instead of a node-side timeout.
+const callGas = 5_000_000
+
 // Registry caches pool metadata.
 type Registry struct {
 	caller      Caller
@@ -127,10 +132,18 @@ func (r *Registry) DrainNew() []dex.Pool {
 // Resolve resolves every unknown candidate. It returns an error only for transient
 // RPC failures, in which case nothing is cached and the caller should retry.
 //
+// v2/v3 pools are read at the block being processed, pinned by its hash (EIP-1898)
+// when hash is not zero, never at "latest": an endpoint lagging behind the block,
+// or following another fork, then fails ("header not found", retried elsewhere)
+// instead of answering from a state where a brand-new pool has no code yet, which
+// would cache it as not canonical forever. Immutables and factory mappings never
+// change once set, so when an endpoint has pruned that state (non-archive nodes
+// during a backfill) the pools are read at "latest" instead.
+//
 // v4 pools are resolved from Initialize candidates only. A swap on a v4 pool that
 // is still unknown (initialized before the index sync) is left unresolved and not
 // cached, so classification skips it rather than guessing.
-func (r *Registry) Resolve(ctx context.Context, block uint64, cands []dex.Candidate) error {
+func (r *Registry) Resolve(ctx context.Context, block uint64, hash eth.Hash, cands []dex.Candidate) error {
 	var todo []dex.Candidate
 	seen := make(map[dex.PoolID]bool, len(cands))
 	for _, c := range cands {
@@ -151,11 +164,15 @@ func (r *Registry) Resolve(ctx context.Context, block uint64, cands []dex.Candid
 	if len(todo) == 0 {
 		return nil
 	}
-	pools, err := r.readImmutables(ctx, block, todo)
-	if err != nil {
-		return err
+	var at any = eth.FormatBlock(block)
+	if !hash.IsZero() {
+		at = rpc.BlockHash{Hash: hash}
 	}
-	if err := r.verifyWithFactories(ctx, pools); err != nil {
+	pools, err := r.resolveAt(ctx, at, block, todo)
+	if rpc.IsMissingState(err) {
+		pools, err = r.resolveAt(ctx, rpc.Latest, block, todo)
+	}
+	if err != nil {
 		return err
 	}
 	for _, p := range pools {
@@ -183,34 +200,52 @@ func (r *Registry) addV4(p dex.Pool) {
 	r.fresh = append(r.fresh, p)
 }
 
+// resolveAt reads the candidates' immutables and verifies them with their
+// factories, both at the given block (a tag string or an rpc.BlockHash).
+func (r *Registry) resolveAt(ctx context.Context, tag any, block uint64, todo []dex.Candidate) ([]dex.Pool, error) {
+	pools, err := r.readImmutables(ctx, tag, block, todo)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.verifyWithFactories(ctx, tag, pools); err != nil {
+		return nil, err
+	}
+	return pools, nil
+}
+
+func call(to eth.Address, data eth.Data, tag any, out *eth.Data) rpc.Request {
+	return rpc.NewCallMsg(rpc.CallMsg{To: to, Data: data, Gas: callGas}, tag, out)
+}
+
 // readImmutables reads factory(), token0(), token1() and, for v3, fee() of each candidate.
-func (r *Registry) readImmutables(ctx context.Context, block uint64, todo []dex.Candidate) ([]dex.Pool, error) {
+func (r *Registry) readImmutables(ctx context.Context, tag any, block uint64, todo []dex.Candidate) ([]dex.Pool, error) {
 	type slot struct{ factory, token0, token1, fee eth.Data }
 	slots := make([]slot, len(todo))
 	reqs := make([]rpc.Request, 0, 4*len(todo))
 	for i, c := range todo {
 		s := &slots[i]
 		reqs = append(reqs,
-			rpc.NewCall(c.Contract, selFactory.Calldata(), rpc.Latest, &s.factory),
-			rpc.NewCall(c.Contract, selToken0.Calldata(), rpc.Latest, &s.token0),
-			rpc.NewCall(c.Contract, selToken1.Calldata(), rpc.Latest, &s.token1),
+			call(c.Contract, selFactory.Calldata(), tag, &s.factory),
+			call(c.Contract, selToken0.Calldata(), tag, &s.token0),
+			call(c.Contract, selToken1.Calldata(), tag, &s.token1),
 		)
 		if c.Kind == dex.KindV3 {
-			reqs = append(reqs, rpc.NewCall(c.Contract, selFee.Calldata(), rpc.Latest, &s.fee))
+			reqs = append(reqs, call(c.Contract, selFee.Calldata(), tag, &s.fee))
 		}
 	}
 	if err := r.caller.Batch(ctx, reqs); err != nil {
 		return nil, err
 	}
-	// Only an EVM revert proves "not a pool". Any other error (rate limits, an
-	// endpoint lacking eth_call, ...) aborts the resolution so nothing wrong is
-	// cached; the caller retries.
+	// Only a failure inside the EVM (a revert, an invalid opcode, out of gas, ...)
+	// proves "not a pool": it is a property of the contract. Any other error (rate
+	// limits, an endpoint lacking eth_call, ...) aborts the resolution so nothing
+	// wrong is cached; the caller retries.
 	failed := make(map[eth.Address]bool)
 	for _, q := range reqs {
 		if q.Err == nil {
 			continue
 		}
-		if !rpc.IsRevert(q.Err) {
+		if !rpc.IsExecutionError(q.Err) {
 			return nil, fmt.Errorf("registry: resolve pools at block %d: %w", block, q.Err)
 		}
 		failed[q.Params[0].(rpc.CallMsg).To] = true
@@ -234,7 +269,7 @@ func (r *Registry) readImmutables(ctx context.Context, block uint64, todo []dex.
 }
 
 // verifyWithFactories marks pools canonical when their factory maps their tokens back to them.
-func (r *Registry) verifyWithFactories(ctx context.Context, pools []dex.Pool) error {
+func (r *Registry) verifyWithFactories(ctx context.Context, tag any, pools []dex.Pool) error {
 	var reqs []rpc.Request
 	var idx []int
 	answers := make([]eth.Data, len(pools))
@@ -250,7 +285,7 @@ func (r *Registry) verifyWithFactories(ctx context.Context, pools []dex.Pool) er
 		} else {
 			data = selGetPool.Calldata(p.Token0.Word(), p.Token1.Word(), eth.Uint64Word(uint64(p.FeePips)))
 		}
-		reqs = append(reqs, rpc.NewCall(f.Address, data, rpc.Latest, &answers[i]))
+		reqs = append(reqs, call(f.Address, data, tag, &answers[i]))
 		idx = append(idx, i)
 	}
 	if len(reqs) == 0 {
@@ -262,7 +297,7 @@ func (r *Registry) verifyWithFactories(ctx context.Context, pools []dex.Pool) er
 	for k, q := range reqs {
 		i := idx[k]
 		if q.Err != nil {
-			if !rpc.IsRevert(q.Err) {
+			if !rpc.IsExecutionError(q.Err) {
 				return fmt.Errorf("registry: verify pool %s: %w", pools[i].Contract, q.Err)
 			}
 			continue

@@ -10,6 +10,13 @@ import (
 // Latest is the "latest" block tag.
 const Latest = "latest"
 
+// BlockHash is an EIP-1898 block parameter: the state of exactly that block. A
+// node that does not have it (lagging, or following another fork) answers
+// "header not found" instead of answering from a different state.
+type BlockHash struct {
+	Hash eth.Hash `json:"blockHash"`
+}
+
 // ChainID returns eth_chainId.
 func (c *Client) ChainID(ctx context.Context) (uint64, error) {
 	var q eth.Quantity
@@ -71,13 +78,21 @@ func validateBlock(n uint64, b *eth.Block) error {
 
 // CallMsg is the transaction object of eth_call.
 type CallMsg struct {
-	To   eth.Address `json:"to"`
-	Data eth.Data    `json:"data"`
+	To   eth.Address  `json:"to"`
+	Data eth.Data     `json:"data"`
+	Gas  eth.Quantity `json:"gas,omitzero"` // 0 = the node's default cap
 }
 
 // NewCall builds a batched eth_call request whose raw return data is decoded into out.
 func NewCall(to eth.Address, data eth.Data, block string, out *eth.Data) Request {
-	return Request{Method: "eth_call", Params: []any{CallMsg{To: to, Data: data}, block}, Result: out}
+	return NewCallMsg(CallMsg{To: to, Data: data}, block, out)
+}
+
+// NewCallMsg is NewCall with full control over the call object, e.g. a gas cap
+// so that a contract looping forever fails fast with a deterministic out of gas.
+// block is a block tag string or a BlockHash.
+func NewCallMsg(msg CallMsg, block any, out *eth.Data) Request {
+	return Request{Method: "eth_call", Params: []any{msg, block}, Result: out}
 }
 
 // CallContract performs a single eth_call.

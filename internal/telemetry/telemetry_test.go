@@ -28,13 +28,17 @@ func TestMetricsRecordPipelineEvents(t *testing.T) {
 	m.Fetched(2, 1500*time.Millisecond)
 	m.Flushed(&observe.Batch{Blocks: make([]classify.BlockInfo, 4)}, 10*time.Millisecond, nil)
 	m.ObserveRoundTrip("drpc", "batch", 2, 50*time.Millisecond, nil)
+	m.ResolveSkipped(40)
+	m.ResolveSkipped(41)
 
 	checks := map[string]float64{
-		"processed_block":             42,
-		"head_lag_blocks":             5,
-		"processed_block_age_seconds": 10,
-		"swaps_total":                 3,
-		"block_fetch_retries_total":   2,
+		"processed_block":              42,
+		"head_lag_blocks":              5,
+		"processed_block_age_seconds":  10,
+		"swaps_total":                  3,
+		"block_fetch_retries_total":    2,
+		"resolve_skipped_blocks_total": 2,
+		"resolve_skipped_last_block":   41,
 	}
 	for name, want := range checks {
 		if got := gather(t, m, "mevlens_"+name); got != want {

@@ -5,11 +5,13 @@ import (
 	"errors"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/huynhnhatkhanh/mevlens/internal/classify"
+	"github.com/huynhnhatkhanh/mevlens/internal/dex"
 	"github.com/huynhnhatkhanh/mevlens/internal/eth"
 	"github.com/huynhnhatkhanh/mevlens/internal/pricing"
 	"github.com/huynhnhatkhanh/mevlens/internal/registry"
@@ -253,6 +255,58 @@ func TestSinkFailureStopsPipeline(t *testing.T) {
 		err := newPipeline(t, Config{FlushBlocks: 10}, chain, &memSink{fail: boom}).Backfill(t.Context(), 1, 50, nil)
 		if !errors.Is(err, boom) {
 			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+// failingResolver fails every resolution, like a pool whose eth_calls keep
+// failing in a way the registry cannot classify.
+type failingResolver struct{ calls atomic.Int32 }
+
+func (f *failingResolver) Resolve(context.Context, uint64, eth.Hash, []dex.Candidate) error {
+	f.calls.Add(1)
+	return errors.New("registry: resolve pools: boom")
+}
+
+func (*failingResolver) DrainNew() []dex.Pool { return nil }
+
+// skipMetrics records ResolveSkipped events.
+type skipMetrics struct {
+	NopMetrics
+	skipped []uint64
+}
+
+func (m *skipMetrics) ResolveSkipped(block uint64) { m.skipped = append(m.skipped, block) }
+
+func TestResolveFailureDoesNotHaltPipeline(t *testing.T) {
+	// Regression: resolution used to be retried forever, so one bad Swap emitter
+	// halted ingestion at its block, across restarts too.
+	synctest.Test(t, func(t *testing.T) {
+		chain := &fakeChain{head: 3, fork: map[uint64]byte{}}
+		sink := &memSink{}
+		reg, err := registry.New(nil, nil, eth.Address{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		o, err := pricing.New(pricing.Config{WETH: eth.MustAddress("0x82af49447d8a07e3bd95bd0d56f35241523fbab1")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		res := &failingResolver{}
+		m := &skipMetrics{}
+		p := New(Config{ResolveAttempts: 4}, chain, res, classify.New(reg, o), sink, m, nil)
+
+		if err := p.Backfill(t.Context(), 1, 3, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got := sink.blocks(); !slices.Equal(got, seq(1, 3)) {
+			t.Fatalf("blocks = %v, want 1..3 processed despite resolution failures", got)
+		}
+		if n := res.calls.Load(); n != 12 {
+			t.Fatalf("resolve calls = %d, want 4 attempts x 3 blocks", n)
+		}
+		if !slices.Equal(m.skipped, seq(1, 3)) {
+			t.Fatalf("skipped blocks reported = %v, want 1..3: incomplete blocks must be visible", m.skipped)
 		}
 	})
 }

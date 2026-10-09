@@ -31,6 +31,8 @@ type Metrics struct {
 	flushRows     *prometheus.CounterVec
 	flushErrors   prometheus.Counter
 	reorgs        prometheus.Counter
+	skipped       prometheus.Counter
+	lastSkipped   prometheus.Gauge
 	rpcRequests   *prometheus.CounterVec
 	rpcDuration   *prometheus.HistogramVec
 	rpcBatchSize  prometheus.Histogram
@@ -63,6 +65,8 @@ func NewMetrics(slowThreshold time.Duration, onSlow func(reason string)) *Metric
 		flushRows:     f.counterVec("flushed_rows_total", "Rows persisted.", "table"),
 		flushErrors:   f.counter("flush_errors_total", "Failed batch writes."),
 		reorgs:        f.counter("reorgs_total", "Chain reorganisations detected."),
+		skipped:       f.counter("resolve_skipped_blocks_total", "Blocks processed with unresolved pools skipped (possibly incomplete)."),
+		lastSkipped:   f.gauge("resolve_skipped_last_block", "Latest block processed with unresolved pools skipped; re-ingest it to complete it."),
 		rpcRequests:   f.counterVec("rpc_round_trips_total", "JSON-RPC HTTP round trips.", "endpoint", "method", "result"),
 		rpcDuration:   f.histogramVec("rpc_round_trip_duration_seconds", "JSON-RPC round-trip latency.", latency, "endpoint"),
 		rpcBatchSize:  f.histogram("rpc_batch_size", "Requests per JSON-RPC round trip.", prometheus.ExponentialBuckets(1, 2, 8)),
@@ -119,6 +123,12 @@ func (m *Metrics) Flushed(b *observe.Batch, d time.Duration, err error) {
 
 // Reorg implements observe.Metrics.
 func (m *Metrics) Reorg(uint64) { m.reorgs.Inc() }
+
+// ResolveSkipped implements observe.Metrics.
+func (m *Metrics) ResolveSkipped(block uint64) {
+	m.skipped.Inc()
+	m.lastSkipped.Set(float64(block))
+}
 
 // ObserveRoundTrip implements rpc.Observer.
 func (m *Metrics) ObserveRoundTrip(endpoint, method string, batch int, d time.Duration, err error) {

@@ -78,8 +78,16 @@ type endpoint struct {
 	mu            sync.Mutex
 	failures      int
 	cooldownUntil time.Time
-	unsupported   map[string]bool // methods this provider refuses (learned at runtime)
+	unsupported   map[string]time.Time // methods this provider refuses, until the given time (learned at runtime)
 }
+
+// How long a learned capability gap is trusted before the endpoint is asked again.
+// A JSON-RPC "method not found" is a stable property of a provider; an HTTP 403 is
+// often a WAF challenge, a quota or a temporary ban, so it is re-probed sooner.
+const (
+	unsupportedTTL = 30 * time.Minute
+	refusedTTL     = 5 * time.Minute
+)
 
 // Option customises a Client.
 type Option func(*Client)
@@ -180,7 +188,7 @@ const (
 	outcomeDone      outcome = iota // nothing to retry
 	outcomeTransient                // retry after a backoff, possibly elsewhere
 	outcomeFailover                 // the endpoint lacks a method (remembered): try another now
-	outcomeTooWide                  // the endpoint refuses this request's size: try another now
+	outcomeSkip                     // the endpoint cannot serve this request (size, height): try another now
 )
 
 func (c *Client) batchWithRetry(ctx context.Context, reqs []Request) error {
@@ -189,18 +197,31 @@ func (c *Client) batchWithRetry(ctx context.Context, reqs []Request) error {
 		pending[i] = i
 		reqs[i].Err = nil
 	}
-	// Endpoints that refused this particular request as too wide (eth_getLogs
-	// ranges); other endpoints may accept it, so only this call skips them.
-	var tooWide map[*endpoint]bool
+	// Endpoints that cannot serve this particular request: eth_getLogs ranges too
+	// wide for them, or a block they lack (lagging) or have pruned the state of.
+	// Other endpoints may serve it, so only this call skips them.
+	var skip map[*endpoint]bool
+	// The last per-call refusal of each request. When the endpoints left then fail
+	// for unrelated reasons (a rate limit, a batch cap), the refusal is what the
+	// caller can act on: narrow a log range, or read pruned state at "latest".
+	var refusals map[int]error
+	preferRefusals := func() {
+		for _, i := range pending {
+			if e, ok := refusals[i]; ok && !refusal(reqs[i].Method, reqs[i].Err) {
+				reqs[i].Err = e
+			}
+		}
+	}
 	for attempt := 0; ; {
-		ep := c.pickEndpoint(reqs, pending, tooWide)
+		ep := c.pickEndpoint(reqs, pending, skip)
 		if ep == nil {
-			if len(tooWide) == 0 {
+			if len(skip) == 0 {
 				for _, i := range pending {
 					reqs[i].Err = fmt.Errorf("%w: %s", ErrUnsupported, reqs[i].Method)
 				}
 			}
-			return nil // with tooWide, reqs[i].Err holds the refusal: the caller narrows the request
+			preferRefusals()
+			return nil // with skip, reqs[i].Err holds the refusal (e.g. the caller narrows a log range)
 		}
 		failed, kind := c.roundTrip(ctx, ep, reqs, pending)
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -211,19 +232,28 @@ func (c *Client) batchWithRetry(ctx context.Context, reqs []Request) error {
 			return nil
 		}
 		pending = failed
+		for _, i := range failed {
+			if refusal(reqs[i].Method, reqs[i].Err) {
+				if refusals == nil {
+					refusals = make(map[int]error)
+				}
+				refusals[i] = reqs[i].Err
+			}
+		}
 		switch kind {
 		case outcomeFailover:
 			continue
-		case outcomeTooWide:
-			if tooWide == nil {
-				tooWide = make(map[*endpoint]bool)
+		case outcomeSkip:
+			if skip == nil {
+				skip = make(map[*endpoint]bool)
 			}
-			tooWide[ep] = true
+			skip[ep] = true
 			continue
 		}
 		ep.markFailure(c.backoff(ep.failureCount()))
 		if attempt++; attempt >= c.cfg.MaxAttempts {
-			return nil // reqs[i].Err already holds the last retryable error
+			preferRefusals()
+			return nil // reqs[i].Err holds the last retryable error, or a refusal
 		}
 		if err := sleep(ctx, c.backoff(attempt-1)); err != nil {
 			return err
@@ -247,22 +277,31 @@ func (c *Client) roundTrip(ctx context.Context, ep *endpoint, reqs []Request, pe
 		for _, i := range pending {
 			reqs[i].Err = err
 		}
+		m, single := singleMethod(reqs, pending)
 		switch {
-		case tooWide(method, err):
-			return pending, outcomeTooWide
-		case methodRefused(err):
-			// e.g. a free endpoint answering eth_getLogs with HTTP 403: a property
-			// of the endpoint, not a transient fault. Learn it and fail over.
-			for _, i := range pending {
-				ep.markUnsupported(reqs[i].Method)
-			}
+		case single && tooWide(m, err):
+			return pending, outcomeSkip
+		case single && methodRefused(err):
+			// e.g. a free endpoint answering eth_getLogs with HTTP 403. Learn it
+			// (for a while) and fail over, but only when the refusal can be pinned
+			// on one method: a 403 to a mixed batch says nothing about which one.
+			ep.markUnsupported(m, refusedTTL)
 			return pending, outcomeFailover
-		case IsRetryable(err):
-			return pending, outcomeTransient
 		}
-		return nil, outcomeDone
+		// Everything else (rate limits, auth or routing errors, malformed or
+		// oversized bodies) is a fault of this endpoint, not of the requests:
+		// back off and try another endpoint. Should it persist everywhere, the
+		// caller sees a retryable ErrEndpoints. A JSON-RPC error object answering
+		// the whole batch keeps its own classification.
+		var re *Error
+		if !errors.As(err, &re) {
+			for _, i := range pending {
+				reqs[i].Err = fmt.Errorf("%w: %w", ErrEndpoints, err)
+			}
+		}
+		return pending, outcomeTransient
 	}
-	var transient, wide, missing bool
+	var transient, skipped, missing bool
 	for _, i := range pending {
 		reqs[i].Err = nil // clear the outcome of a previous attempt
 		r, ok := resps[i]
@@ -279,11 +318,11 @@ func (c *Client) roundTrip(ctx context.Context, ep *endpoint, reqs []Request, pe
 			}
 		}
 		switch e := reqs[i].Err; {
-		case e == nil:
-		case tooWide(reqs[i].Method, e):
-			failed, wide = append(failed, i), true
+		case e == nil, IsExecutionError(e): // a revert is the contract's final answer
+		case refusal(reqs[i].Method, e):
+			failed, skipped = append(failed, i), true
 		case IsUnsupported(e):
-			ep.markUnsupported(reqs[i].Method)
+			ep.markUnsupported(reqs[i].Method, unsupportedTTL)
 			failed, missing = append(failed, i), true
 		case IsRetryable(e):
 			failed, transient = append(failed, i), true
@@ -294,17 +333,28 @@ func (c *Client) roundTrip(ctx context.Context, ep *endpoint, reqs []Request, pe
 	switch {
 	case transient:
 		return failed, outcomeTransient
-	case wide:
-		return failed, outcomeTooWide
+	case skipped:
+		return failed, outcomeSkip
 	case missing:
 		return failed, outcomeFailover
 	}
 	return failed, outcomeDone
 }
 
+// refusal reports an error meaning "this endpoint cannot serve this request" (a
+// log range too wide, a block it lacks or has pruned) where another may.
+func refusal(method string, err error) bool {
+	return tooWide(method, err) || IsUnknownBlock(err) || IsMissingState(err)
+}
+
 // tooWide reports an eth_getLogs request refused for its block span or result size.
+// A rate limit or server error is never a refusal, whatever its body says.
 func tooWide(method string, err error) bool {
-	return (method == "eth_getLogs" || method == "batch") && IsLogRangeError(err)
+	var he *HTTPError
+	if errors.As(err, &he) && (he.Status == http.StatusTooManyRequests || he.Status >= 500) {
+		return false
+	}
+	return method == "eth_getLogs" && IsLogRangeError(err)
 }
 
 type wireRequest struct {
@@ -367,7 +417,9 @@ func (c *Client) send(ctx context.Context, ep *endpoint, reqs []Request, pending
 		return nil, &TransportError{Endpoint: ep.name, Err: err}
 	}
 	if int64(len(raw)) > c.cfg.MaxBodySize {
-		return nil, fmt.Errorf("rpc: response from %s exceeds %d bytes", ep.name, c.cfg.MaxBodySize)
+		// "response size" makes an oversized eth_getLogs answer a range error the
+		// caller can narrow.
+		return nil, fmt.Errorf("rpc: response size from %s exceeds %d bytes", ep.name, c.cfg.MaxBodySize)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, &HTTPError{Endpoint: ep.name, Status: resp.StatusCode, Body: snippet(raw)}
@@ -464,21 +516,33 @@ func (e *endpoint) markFailure(d time.Duration) {
 func (e *endpoint) supportsAll(reqs []Request, pending []int) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	now := time.Now()
 	for _, i := range pending {
-		if e.unsupported[reqs[i].Method] {
+		if until, ok := e.unsupported[reqs[i].Method]; ok && now.Before(until) {
 			return false
 		}
 	}
 	return true
 }
 
-func (e *endpoint) markUnsupported(method string) {
+func (e *endpoint) markUnsupported(method string, ttl time.Duration) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.unsupported == nil {
-		e.unsupported = make(map[string]bool)
+		e.unsupported = make(map[string]time.Time)
 	}
-	e.unsupported[method] = true
+	e.unsupported[method] = time.Now().Add(ttl)
+}
+
+// singleMethod returns the method shared by all pending requests, if there is one.
+func singleMethod(reqs []Request, pending []int) (string, bool) {
+	m := reqs[pending[0]].Method
+	for _, i := range pending[1:] {
+		if reqs[i].Method != m {
+			return "", false
+		}
+	}
+	return m, true
 }
 
 func (e *endpoint) markSuccess() {
