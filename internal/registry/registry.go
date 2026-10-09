@@ -152,8 +152,11 @@ func (r *Registry) Resolve(ctx context.Context, block uint64, hash eth.Hash, can
 		}
 		switch c.Kind {
 		case dex.KindV4:
+			// Not marked seen: an Initialize-shaped log from an untrusted contract
+			// must not shadow a later candidate with the same id (the genuine
+			// Initialize, or a v2/v3 pool whose address-form id it copied). A pool
+			// addV4 accepts is in r.pools, which skips its duplicates.
 			if c.Init != nil {
-				seen[c.ID] = true
 				r.addV4(*c.Init)
 			}
 		case dex.KindV2, dex.KindV3:
