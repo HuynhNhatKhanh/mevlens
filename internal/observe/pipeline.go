@@ -16,7 +16,6 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -47,7 +46,8 @@ type Resolver interface {
 }
 
 // Sink persists batches. Write must be idempotent: the same rows may be written
-// more than once after a crash or a reorg rewind.
+// more than once after a crash, a reorg rewind, or a failed Write, which the
+// pipeline retries with the same batch until it succeeds or the run stops.
 type Sink interface {
 	Write(ctx context.Context, b *Batch) error
 }
@@ -150,7 +150,9 @@ type Pipeline struct {
 	sink Sink
 	m    Metrics
 	log  *slog.Logger
-	head atomic.Uint64 // latest head seen in follow mode
+	// carry holds the pools of a batch dropped on reorg, for the next run's
+	// first batch. Only process touches it, and runs never overlap.
+	carry []dex.Pool
 }
 
 // New builds a Pipeline. m and log may be nil.
@@ -230,7 +232,6 @@ func (p *Pipeline) followNumbers(start uint64) numberSource {
 				continue
 			}
 			attempt = 0
-			p.head.Store(head)
 			p.m.Head(head)
 			for ; next <= head; next++ {
 				select {
@@ -363,25 +364,48 @@ func (p *Pipeline) process(ctx context.Context, blocks <-chan *eth.Block, parent
 	if haveParent {
 		lastHash = *parent
 	}
+	batch.Pools, p.carry = p.carry, nil
+	// flush retries until the batch is written or ctx is done: a ClickHouse
+	// restart or a transient TOO_MANY_PARTS must not stop ingestion for good.
+	// The batch is kept intact between attempts and Write is idempotent, so
+	// re-sending a partly written batch is harmless. It fails only once ctx is
+	// done.
 	flush := func(ctx context.Context) error {
 		if batch.Len() == 0 {
 			return nil
 		}
-		start := time.Now()
-		err := p.sink.Write(ctx, &batch)
-		p.m.Flushed(&batch, time.Since(start), err)
-		if err != nil {
-			return fmt.Errorf("observe: flush through block %d: %w", batch.Checkpoint.Block, err)
+		for attempt := 0; ; attempt++ {
+			start := time.Now()
+			err := p.sink.Write(ctx, &batch)
+			p.m.Flushed(&batch, time.Since(start), err)
+			if err == nil {
+				break
+			}
+			if ctx.Err() != nil {
+				return fmt.Errorf("observe: flush through block %d: %w", batch.Checkpoint.Block, err)
+			}
+			p.log.Warn("flush failed, retrying", "checkpoint", batch.Checkpoint.Block, "attempt", attempt, "err", err)
+			if sleep(ctx, p.backoff(attempt)) != nil {
+				return fmt.Errorf("observe: flush through block %d: %w", batch.Checkpoint.Block, err)
+			}
 		}
 		p.log.Debug("flushed", "blocks", batch.Len(), "swaps", len(batch.Swaps), "arbs", len(batch.Arbs), "checkpoint", batch.Checkpoint.Block)
 		batch = Batch{}
 		return nil
 	}
-	// On shutdown, persist what has been processed using a detached context.
-	finalFlush := func() error {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	// stop ends the run once ctx is done. It persists what has been processed
+	// using a detached context, whose timeout also bounds flush's retries: a
+	// sink that stays down cannot hold up shutdown forever.
+	stop := func() error {
+		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
-		return flush(ctx)
+		if err := flush(fctx); err != nil {
+			// Logged because the errgroup usually reports the cancellation
+			// that caused the stop, not this error.
+			p.log.Error("final flush failed, unflushed blocks are processed again on restart", "err", err)
+			return err
+		}
+		return ctx.Err()
 	}
 
 	ticker := time.NewTicker(p.cfg.FlushInterval)
@@ -389,40 +413,41 @@ func (p *Pipeline) process(ctx context.Context, blocks <-chan *eth.Block, parent
 	for {
 		select {
 		case <-ctx.Done():
-			if err := finalFlush(); err != nil {
-				return err
-			}
-			return ctx.Err()
+			return stop()
 		case <-ticker.C:
-			if err := flush(ctx); err != nil {
-				return err
+			if flush(ctx) != nil { // ctx is done
+				return stop()
 			}
 		case b, ok := <-blocks:
 			if !ok {
-				return finalFlush()
+				// The input ended: a backfill completed, or the run is stopping.
+				if ctx.Err() == nil && flush(ctx) == nil {
+					return nil
+				}
+				return stop()
 			}
 			n := uint64(b.Header.Number)
 			if haveParent && b.Header.ParentHash != lastHash {
-				// The unflushed tail may belong to the abandoned fork: drop it.
+				// The unflushed tail may belong to the abandoned fork: drop it,
+				// but keep its pools. The registry keeps them cached across the
+				// rewind and never drains them again, so dropping them would
+				// leave them unpersisted until a restart.
+				p.carry = batch.Pools
 				return &ReorgError{Block: n, Expected: lastHash, Got: b.Header.ParentHash}
 			}
-			if err := p.resolve(ctx, n, b); err != nil {
-				return err
+			if p.resolve(ctx, n, b) != nil { // ctx is done
+				// Shutting down mid-resolution: the blocks before n are complete
+				// and their pools already drained, so persist them like any stop.
+				return stop()
 			}
 			res := p.cl.Classify(b)
 			batch.add(&res, p.reg.DrainNew())
 			batch.Checkpoint = Checkpoint{Name: p.cfg.CheckpointName, Block: n, Hash: b.Header.Hash}
 			lastHash, haveParent = b.Header.Hash, true
 
-			var lag uint64
-			if head := p.head.Load(); head > n {
-				lag = head - n
-			}
-			p.m.Processed(&res, lag)
-			if batch.Len() >= p.cfg.FlushBlocks {
-				if err := flush(ctx); err != nil {
-					return err
-				}
+			p.m.Processed(&res)
+			if batch.Len() >= p.cfg.FlushBlocks && flush(ctx) != nil { // ctx is done
+				return stop()
 			}
 		}
 	}
@@ -431,7 +456,7 @@ func (p *Pipeline) process(ctx context.Context, blocks <-chan *eth.Block, parent
 // resolve resolves the block's pool candidates, retrying transient failures. When
 // the attempts run out, the block is processed anyway: unresolved pools are not
 // cached, so their swaps are skipped here and resolution is tried again the next
-// time they appear.
+// time they appear. It fails only once ctx is done.
 func (p *Pipeline) resolve(ctx context.Context, n uint64, b *eth.Block) error {
 	cands := p.cl.Candidates(b)
 	for attempt := 0; ; attempt++ {

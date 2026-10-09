@@ -22,9 +22,10 @@ func TestMetricsRecordPipelineEvents(t *testing.T) {
 	m := NewMetrics(time.Second, func(r string) { slow = append(slow, r) })
 	m.now = func() time.Time { return time.Unix(1_000_010, 0) }
 
+	m.Head(47)
 	m.Processed(&classify.Result{Block: classify.BlockInfo{
 		Number: 42, Timestamp: 1_000_000, Swaps: 3, Arbs: 2, RevertedArbs: 1, Regime: classify.RegimePGA,
-	}}, 5)
+	}})
 	m.Fetched(2, 1500*time.Millisecond)
 	m.Flushed(&observe.Batch{Blocks: make([]classify.BlockInfo, 4)}, 10*time.Millisecond, nil)
 	m.ObserveRoundTrip("drpc", "batch", 2, 50*time.Millisecond, nil)
@@ -56,6 +57,48 @@ func TestMetricsRecordPipelineEvents(t *testing.T) {
 	}
 	if len(slow) != 1 || !strings.Contains(slow[0], "block fetch") {
 		t.Errorf("slow callbacks = %v", slow)
+	}
+}
+
+func TestStalledPipelineAges(t *testing.T) {
+	// Regression: lag and age were set only when a block was processed, so a
+	// pipeline stuck fetching or resolving kept reporting its last healthy
+	// values (lag 0, age ~0.5s) and the dashboard stayed green.
+	m := NewMetrics(0, nil)
+	now := time.Unix(1_000_000, 0)
+	m.now = func() time.Time { return now }
+
+	for name, want := range map[string]float64{"head_lag_blocks": 0, "processed_block_age_seconds": 0} {
+		if got := gather(t, m, "mevlens_"+name); got != want {
+			t.Errorf("before any block: %s = %v, want %v", name, got, want)
+		}
+	}
+
+	m.Head(100)
+	m.Processed(&classify.Result{Block: classify.BlockInfo{Number: 100, Timestamp: 1_000_000}})
+	now = now.Add(500 * time.Millisecond)
+	if got := gather(t, m, "mevlens_processed_block_age_seconds"); got != 0.5 {
+		t.Errorf("healthy age = %v, want 0.5", got)
+	}
+	if got := gather(t, m, "mevlens_head_lag_blocks"); got != 0 {
+		t.Errorf("healthy lag = %v, want 0", got)
+	}
+
+	// The pipeline stalls: the head moves on, nothing is processed.
+	now = now.Add(90 * time.Second)
+	m.Head(130)
+	if got := gather(t, m, "mevlens_processed_block_age_seconds"); got != 90.5 {
+		t.Errorf("stalled age = %v, want 90.5", got)
+	}
+	if got := gather(t, m, "mevlens_head_lag_blocks"); got != 30 {
+		t.Errorf("stalled lag = %v, want 30", got)
+	}
+
+	// A head behind the processed block (a lagging node behind the balancer) is
+	// no lag.
+	m.Head(90)
+	if got := gather(t, m, "mevlens_head_lag_blocks"); got != 0 {
+		t.Errorf("lag with head behind = %v, want 0", got)
 	}
 }
 
