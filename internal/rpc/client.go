@@ -372,7 +372,7 @@ type wireResponse struct {
 
 // send performs one HTTP round trip and maps responses back to request indexes.
 func (c *Client) send(ctx context.Context, ep *endpoint, reqs []Request, pending []int) (map[int]wireResponse, error) {
-	if err := ep.limiter.WaitN(ctx, min(len(pending), ep.limiter.Burst())); err != nil {
+	if err := waitTokens(ctx, ep.limiter, len(pending)); err != nil {
 		return nil, err
 	}
 	wire := make([]wireRequest, len(pending))
@@ -459,6 +459,24 @@ func decodeResponses(raw []byte, byID map[uint64]int) (map[int]wireResponse, err
 		}
 	}
 	return out, nil
+}
+
+// waitTokens takes one token per request: providers rate-limit the calls inside a
+// batch, not HTTP round trips. A batch larger than the bucket waits for it to
+// refill as many times as needed.
+func waitTokens(ctx context.Context, l *rate.Limiter, n int) error {
+	for n > 0 {
+		k := min(n, l.Burst())
+		if err := l.WaitN(ctx, k); err != nil {
+			// WaitN fails early when the wait would outlast ctx's deadline. That
+			// is the caller's deadline, not a fault of the endpoint: let it expire
+			// so the caller sees its own context error.
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		n -= k
+	}
+	return nil
 }
 
 // pickEndpoint round-robins across endpoints that support every pending method,

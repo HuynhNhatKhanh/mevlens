@@ -372,6 +372,48 @@ func TestIsRevert(t *testing.T) {
 	}
 }
 
+func TestRateLimitCountsEveryRequestOfABatch(t *testing.T) {
+	// Regression: a batch took at most Burst tokens, so a 50-call batch on an
+	// rps=4 endpoint cost 4 tokens and the provider saw ~12x its limit.
+	node := &fakeNode{t: t, handle: func(int, rpcReq) (string, *Error) { return `"0x1"`, nil }}
+	srv := httptest.NewServer(node)
+	defer srv.Close()
+	c, err := New(Config{Endpoints: []EndpointConfig{{URL: srv.URL, RPS: 100, Burst: 10}}, MaxBatch: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqs := make([]Request, 50)
+	for i := range reqs {
+		reqs[i] = Request{Method: "eth_blockNumber"}
+	}
+	start := time.Now()
+	if err := c.Batch(context.Background(), reqs); err != nil {
+		t.Fatal(err)
+	}
+	// 10 tokens are available at once, the other 40 refill at 100/s.
+	if d := time.Since(start); d < 350*time.Millisecond {
+		t.Fatalf("50 requests at 100 rps (burst 10) took %v, want >= 400ms", d)
+	}
+}
+
+func TestRateLimitWaitPastDeadlineIsTheCallersError(t *testing.T) {
+	node := &fakeNode{t: t, handle: func(int, rpcReq) (string, *Error) { return `"0x1"`, nil }}
+	srv := httptest.NewServer(node)
+	defer srv.Close()
+	c, _ := New(Config{Endpoints: []EndpointConfig{{URL: srv.URL, RPS: 1, Burst: 1}}})
+	if err := c.Call(context.Background(), nil, "eth_blockNumber"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := c.Call(ctx, nil, "eth_blockNumber"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want the caller's deadline", err)
+	}
+	if n := c.endpoints[0].failureCount(); n != 0 {
+		t.Fatalf("endpoint failures = %d: waiting for the rate limit is not an endpoint fault", n)
+	}
+}
+
 func TestLogRangeRefusalFailsOverPerCall(t *testing.T) {
 	// dRPC's free plan refuses eth_getLogs over 10k blocks while Arbitrum's public
 	// endpoint accepts 10M: the wide query must go to the endpoint that accepts it,
