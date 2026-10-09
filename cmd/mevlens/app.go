@@ -241,7 +241,12 @@ func (a *app) resume(ctx context.Context, name string, from uint64) (uint64, *et
 		return from, nil, err
 	}
 	a.log.Info("resuming from checkpoint", "checkpoint", name, "block", cp.Block)
-	if cp.Hash.IsZero() { // written by a reorg rewind: no parent to check
+	if cp.Hash.IsZero() {
+		// Written by a reorg rewind, which may have been interrupted before its
+		// deletes completed: finish them (they are idempotent). No parent to check.
+		if err := a.store.Rewind(ctx, name, cp.Block+1); err != nil {
+			return 0, nil, err
+		}
 		return cp.Block + 1, nil, nil
 	}
 	return cp.Block + 1, &cp.Hash, nil
