@@ -432,3 +432,41 @@ func TestV4RequiresNativeAlias(t *testing.T) {
 		t.Fatal("v4 without a native ETH alias must be rejected")
 	}
 }
+
+func TestUntrustedInitializeDoesNotShadowGenuineCandidates(t *testing.T) {
+	// Regression: a fake Initialize earlier in the block marked its id as seen
+	// before the emitter was checked, so the genuine candidate with the same id
+	// was skipped: the real v4 pool (or a v2 pair, via its address-form id) then
+	// stayed unknown and its swaps invisible.
+	chain := newChain()
+	r, err := New(chain, []Factory{
+		{Name: "uniswap-v2", Address: v2Factory, Kind: dex.KindV2},
+		{Name: "uniswap-v4", Address: manager, Kind: dex.KindV4, StartBlock: 100},
+	}, weth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attacker := eth.MustAddress("0x00000000000000000000000000000000000000ff")
+	genuine := initLog(eth.Hash{0x01}, manager, 150)
+	p, _ := dex.DecodeV4Initialize(&genuine)
+	fakeV4 := initLog(eth.Hash{0x01}, attacker, 150)
+	q, _ := dex.DecodeV4Initialize(&fakeV4)
+	fakeV2 := initLog(pairV2.Word(), attacker, 150)
+	f, _ := dex.DecodeV4Initialize(&fakeV2)
+
+	err = r.Resolve(context.Background(), 150, eth.Hash{}, []dex.Candidate{
+		{ID: q.ID, Contract: attacker, Kind: dex.KindV4, Init: &q},
+		{ID: f.ID, Contract: attacker, Kind: dex.KindV4, Init: &f},
+		{ID: p.ID, Contract: manager, Kind: dex.KindV4, Init: &p},
+		cand(pairV2, dex.KindV2),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := r.Lookup(p.ID); !ok || !got.Canonical || got.Contract != manager {
+		t.Fatalf("genuine v4 pool = %+v, %v; want canonical from the PoolManager", got, ok)
+	}
+	if got, ok := r.Lookup(dex.PoolIDFromAddress(pairV2)); !ok || !got.Canonical || got.Kind != dex.KindV2 {
+		t.Fatalf("v2 pair = %+v, %v; want canonical", got, ok)
+	}
+}
