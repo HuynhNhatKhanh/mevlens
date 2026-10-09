@@ -76,7 +76,7 @@ func sampleBatch(block uint64, cp string) *observe.Batch {
 		Pools: []dex.Pool{
 			{ID: v3, Contract: addr(1), Kind: dex.KindV3, Canonical: true, Venue: "uniswap-v3", Token0: addr(8), Token1: addr(9), FeePips: 500, FirstSeen: block},
 			{ID: v4Pool, Contract: poolManager, Factory: poolManager, Kind: dex.KindV4, Canonical: true, Venue: "uniswap-v4",
-				Token0: addr(8), Token1: addr(9), FeePips: 3000, Hooks: addr(0x77), Native: true, FirstSeen: block},
+				Token0: addr(8), Token1: addr(9), DynamicFee: true, Hooks: addr(0x77), Native: true, FirstSeen: block},
 		},
 		Checkpoint: observe.Checkpoint{Name: cp, Block: block, Hash: h},
 	}
@@ -96,7 +96,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	applied, err := s.Migrate(ctx)
-	if err != nil || len(applied) != 4 {
+	if err != nil || len(applied) != 5 {
 		t.Fatalf("migrate = %v, %v", applied, err)
 	}
 	if again, err := s.Migrate(ctx); err != nil || len(again) != 0 {
@@ -161,11 +161,14 @@ func TestStoreRoundTrip(t *testing.T) {
 		t.Fatalf("pools = %+v, %v", got, err)
 	}
 	byID := map[dex.PoolID]dex.Pool{got[0].ID: got[0], got[1].ID: got[1]}
-	if p := byID[v3]; p.Contract != addr(1) || p.Kind != dex.KindV3 || p.FeePips != 500 {
+	if p := byID[v3]; p.Contract != addr(1) || p.Kind != dex.KindV3 || p.FeePips != 500 || p.DynamicFee {
 		t.Fatalf("v3 pool = %+v", p)
 	}
-	if p := byID[v4Pool]; p.Contract != poolManager || p.Kind != dex.KindV4 || p.Hooks != addr(0x77) || !p.Native {
+	if p := byID[v4Pool]; p.Contract != poolManager || p.Kind != dex.KindV4 || p.Hooks != addr(0x77) || !p.Native || !p.DynamicFee || p.FeePips != 0 {
 		t.Fatalf("v4 pool = %+v", p)
+	}
+	if n := count(t, s, "SELECT count() FROM pools_v WHERE dynamic_fee AND fee_pips = 0"); n != 1 {
+		t.Fatalf("dynamic-fee pools in pools_v = %d, want 1", n)
 	}
 	var v4Rows uint64
 	if err := s.conn.QueryRow(ctx, "SELECT count() FROM swaps FINAL WHERE pool_id = ?", string(v4Pool[:])).Scan(&v4Rows); err != nil {
@@ -200,6 +203,44 @@ func TestStoreRoundTrip(t *testing.T) {
 	cp, _, _ = s.LoadCheckpoint(ctx, "follow")
 	if cp.Block != 100 || !cp.Hash.IsZero() {
 		t.Fatalf("checkpoint after rewind = %+v", cp)
+	}
+}
+
+// Pools cached before migration 0005 stored the v4 dynamic-fee flag as a fee
+// and are never re-derived, so the migration must fix them in place.
+func TestDynamicFeeMigrationFixesCachedPools(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if _, err := s.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Rows as written before 0005: the flag in fee_pips, dynamic_fee unset.
+	static := dex.PoolID(eth.Hash{0x5e})
+	legacy := []dex.Pool{
+		{ID: v3, Contract: addr(1), Kind: dex.KindV3, Canonical: true, FeePips: 500},
+		{ID: v4Pool, Contract: poolManager, Kind: dex.KindV4, Canonical: true, FeePips: 8388608},
+		{ID: static, Contract: poolManager, Kind: dex.KindV4, Canonical: true, FeePips: 3000},
+	}
+	if err := s.insertPools(ctx, legacy, s.now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.conn.Exec(ctx, "DELETE FROM schema_migrations WHERE version = '0005_dynamic_fee'"); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := s.Migrate(ctx); err != nil || !slices.Equal(applied, []string{"0005_dynamic_fee"}) {
+		t.Fatalf("re-applying 0005 = %v, %v", applied, err)
+	}
+
+	got, err := s.LoadPools(ctx)
+	if err != nil || len(got) != 3 {
+		t.Fatalf("pools = %+v, %v", got, err)
+	}
+	for _, p := range got {
+		dynamic := p.ID == v4Pool
+		want := map[dex.PoolID]uint32{v3: 500, v4Pool: 0, static: 3000}[p.ID]
+		if p.DynamicFee != dynamic || p.FeePips != want {
+			t.Errorf("pool %s: dynamic_fee = %v fee_pips = %d, want %v %d", p.ID, p.DynamicFee, p.FeePips, dynamic, want)
+		}
 	}
 }
 

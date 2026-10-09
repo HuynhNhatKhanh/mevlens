@@ -177,8 +177,14 @@ func TestDecodeV4Initialize(t *testing.T) {
 		Data:    concat(word(3000), word(60), func() []byte { w := hooks.Word(); return w[:] }(), word(1), word(-5)),
 	}
 	p, ok := DecodeV4Initialize(l)
-	if !ok || p.ID != PoolID(v4ID) || p.Contract != manager || !p.Token0.IsZero() || p.Token1 != token || p.FeePips != 3000 || p.Hooks != hooks {
+	if !ok || p.ID != PoolID(v4ID) || p.Contract != manager || !p.Token0.IsZero() || p.Token1 != token || p.FeePips != 3000 || p.DynamicFee || p.Hooks != hooks {
 		t.Fatalf("pool = %+v %v", p, ok)
+	}
+	// Dynamic-fee pool, like mainnet ETH/USDC 0x0155… in the golden fixtures: the
+	// PoolKey fee is the flag 0x800000, which must not surface as 8,388,608 pips.
+	copy(l.Data[0:32], word(V4DynamicFeeFlag))
+	if p, ok := DecodeV4Initialize(l); !ok || !p.DynamicFee || p.FeePips != 0 {
+		t.Fatalf("dynamic-fee pool = %+v %v", p, ok)
 	}
 	l.Data = l.Data[:64]
 	if _, ok := DecodeV4Initialize(l); ok {

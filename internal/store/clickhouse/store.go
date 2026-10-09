@@ -201,8 +201,9 @@ func (s *Store) insertPools(ctx context.Context, pools []dex.Pool, now time.Time
 	return s.batch(ctx, "INSERT INTO pools", func(add func(...any) error) error {
 		for i := range pools {
 			p := &pools[i]
+			// Columns in table order: dynamic_fee was added last, by migration 0005.
 			if err := add(p.ID[:], p.Contract[:], p.Kind.String(), p.Canonical, p.Venue, p.Factory[:], p.Token0[:], p.Token1[:],
-				p.FeePips, p.Hooks[:], p.Native, p.FirstSeen, now); err != nil {
+				p.FeePips, p.Hooks[:], p.Native, p.FirstSeen, now, p.DynamicFee); err != nil {
 				return err
 			}
 		}
@@ -351,7 +352,7 @@ func (s *Store) Rewind(ctx context.Context, checkpoint string, from uint64) erro
 // LoadPools returns every cached pool.
 func (s *Store) LoadPools(ctx context.Context) ([]dex.Pool, error) {
 	rows, err := s.conn.Query(ctx, `SELECT id, contract, kind, canonical, venue, factory, token0, token1,
-		fee_pips, hooks, native, first_seen FROM pools FINAL`)
+		fee_pips, dynamic_fee, hooks, native, first_seen FROM pools FINAL`)
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse: load pools: %w", err)
 	}
@@ -363,7 +364,7 @@ func (s *Store) LoadPools(ctx context.Context) ([]dex.Pool, error) {
 			id, contract, factory, token0, token1, hooks, kd string
 		)
 		if err := rows.Scan(&id, &contract, &kd, &p.Canonical, &p.Venue, &factory, &token0, &token1,
-			&p.FeePips, &hooks, &p.Native, &p.FirstSeen); err != nil {
+			&p.FeePips, &p.DynamicFee, &hooks, &p.Native, &p.FirstSeen); err != nil {
 			return nil, err
 		}
 		if err := p.Kind.UnmarshalText([]byte(kd)); err != nil {
