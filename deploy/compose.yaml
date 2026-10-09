@@ -1,5 +1,5 @@
-# Local stack: ClickHouse (analytics), VictoriaMetrics (metrics), Grafana (dashboards)
-# and the observatory itself. Everything is free/OSS and fits on one machine.
+# Local stack: ClickHouse (analytics), Prometheus + Alertmanager (metrics, alerts),
+# Grafana (dashboards) and the observatory itself. Everything is free/OSS and fits on one machine.
 #
 #   export CLICKHOUSE_PASSWORD=... CLICKHOUSE_GRAFANA_PASSWORD=... GRAFANA_ADMIN_PASSWORD=...
 #   docker compose -f deploy/compose.yaml up -d
@@ -32,19 +32,34 @@ services:
       timeout: 3s
       retries: 20
 
-  victoriametrics:
-    image: victoriametrics/victoria-metrics:v1.153.0
+  # The image versions below are also used by `make monitoring-check` (promtool,
+  # amtool), which reads them from this file.
+  prometheus:
+    image: prom/prometheus:v3.14.0
     command:
-      - -promscrape.config=/etc/victoriametrics/scrape.yaml
-      - -retentionPeriod=90d
-      - -httpListenAddr=:8428
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=90d
     ports:
-      - "127.0.0.1:8428:8428"
+      - "127.0.0.1:9090:9090"
     volumes:
-      - ./victoriametrics/scrape.yaml:/etc/victoriametrics/scrape.yaml:ro
-      - vm-data:/victoria-metrics-data
+      - ./prometheus:/etc/prometheus:ro # prometheus.yml, rules/ (and their tests/)
+      - prometheus-data:/prometheus
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "host.docker.internal:host-gateway" # scrapes `make follow` on the host
+    depends_on:
+      - alertmanager
+
+  alertmanager:
+    image: prom/alertmanager:v0.34.1
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
+    volumes:
+      - ./alertmanager:/etc/alertmanager:ro
+      - alertmanager-data:/alertmanager
 
   grafana:
     image: grafana/grafana-oss:13.0.2
@@ -90,5 +105,6 @@ services:
 
 volumes:
   clickhouse-data:
-  vm-data:
+  prometheus-data:
+  alertmanager-data:
   grafana-data:

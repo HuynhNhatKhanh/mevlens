@@ -1,12 +1,23 @@
 apiVersion: 1
 
 datasources:
-  - name: VictoriaMetrics
-    uid: victoriametrics
+  - name: Prometheus
+    uid: prometheus
     type: prometheus
     access: proxy
-    url: http://victoriametrics:8428
+    url: http://prometheus:9090
     isDefault: true
+    jsonData:
+      prometheusType: Prometheus
+      timeInterval: 10s # the scrape interval, for $__rate_interval
+
+  - name: Alertmanager
+    uid: alertmanager
+    type: alertmanager
+    access: proxy
+    url: http://alertmanager:9093
+    jsonData:
+      implementation: prometheus
 
   - name: ClickHouse
     uid: clickhouse

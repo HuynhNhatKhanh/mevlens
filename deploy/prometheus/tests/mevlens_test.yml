@@ -1,0 +1,149 @@
+# Unit tests for ../rules/mevlens.yml: `make monitoring-check` (promtool test rules).
+# Series are sampled every 15s; "a+bxN" is a, a+b, ... (N+1 samples), "axN" repeats a.
+rule_files:
+  - ../rules/mevlens.yml
+
+evaluation_interval: 15s
+
+tests:
+  # The host observer stops answering; the compose observer is not running.
+  - interval: 15s
+    input_series:
+      - series: up{job="mevlens-host", instance="host.docker.internal:9464"}
+        values: 1x8 0x40
+      - series: up{job="mevlens", instance="observer:9464"}
+        values: 0x48
+    alert_rule_test:
+      - eval_time: 2m # down since 2m15s: only one observer was ever up, and still is
+        alertname: MevlensDown
+        exp_alerts: []
+      - eval_time: 5m # down for 2m45s
+        alertname: MevlensDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: No MEVLens observer is being scraped
+              description: Neither the compose observer nor `make follow` on the host has answered a scrape for 2 minutes.
+
+  # Processing stops at 5m (4 blocks/s, then flat); the observer stays up.
+  - interval: 15s
+    input_series:
+      - series: mevlens_blocks_processed_total{job="mevlens-host"}
+        values: 0+60x20 1200x80
+    alert_rule_test:
+      - eval_time: 12m # flat for 7m: rate is 0 but not yet for 5m
+        alertname: MevlensStalled
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: MevlensStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: MEVLens has processed no block for 10 minutes
+              description: The observer is up but its pipeline is stalled. Check the RPC endpoints, the logs for "still unavailable" or "flush failed", and ClickHouse.
+
+  # Lag jumps from 7 to 500 blocks at 5m.
+  - interval: 15s
+    input_series:
+      - series: mevlens_head_lag_blocks{job="mevlens-host"}
+        values: 7x20 500x60
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: MevlensFallingBehind
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: MevlensFallingBehind
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: MEVLens is falling behind the chain head
+              description: The last processed block has been more than 240 blocks (about a minute) behind the head for 10 minutes; the RPC endpoints are likely too slow or rate-limited.
+      - eval_time: 4m # a short spike is not an alert either
+        alertname: MevlensFallingBehind
+        exp_alerts: []
+
+  # Every flush fails from 5m on (one failed attempt per 15s).
+  - interval: 15s
+    input_series:
+      - series: mevlens_flush_errors_total{job="mevlens-host"}
+        values: 0x20 1+1x40
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: MevlensFlushFailing
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: MevlensFlushFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: MEVLens cannot write to ClickHouse
+              description: Batch writes have kept failing for 5 minutes. Ingestion is paused while they are retried.
+
+  # One block is processed with unresolved pools at 2m45s.
+  - interval: 15s
+    input_series:
+      - series: mevlens_resolve_skipped_blocks_total{job="mevlens-host"}
+        values: 0x10 1x50
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MevlensIncompleteBlocks
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: MevlensIncompleteBlocks
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Blocks were processed with unresolved pools
+              description: Some blocks in the last hour may be missing swaps and arbitrages. See mevlens_resolve_skipped_last_block and re-ingest them with a backfill.
+
+  # 3 failed round trips for every successful one, across endpoints.
+  - interval: 15s
+    input_series:
+      - series: mevlens_rpc_round_trips_total{job="mevlens-host", endpoint="drpc", method="batch", result="error"}
+        values: 0+3x80
+      - series: mevlens_rpc_round_trips_total{job="mevlens-host", endpoint="arbitrum-foundation", method="batch", result="ok"}
+        values: 0+1x80
+      - series: mevlens_rpc_round_trips_total{job="mevlens-host", endpoint="publicnode", method="batch", result="error"}
+        values: 0x80
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: MevlensRPCErrors
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: MevlensRPCErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Most JSON-RPC round trips are failing
+              description: More than half of the RPC round trips have failed for 10 minutes. See mevlens_rpc_round_trips_total by endpoint.
+
+  # A healthy observer fires nothing.
+  - interval: 15s
+    input_series:
+      - series: up{job="mevlens-host", instance="host.docker.internal:9464"}
+        values: 1x80
+      - series: mevlens_blocks_processed_total{job="mevlens-host"}
+        values: 0+60x80
+      - series: mevlens_head_lag_blocks{job="mevlens-host"}
+        values: 7x80
+      - series: mevlens_flush_errors_total{job="mevlens-host"}
+        values: 0x80
+      - series: mevlens_resolve_skipped_blocks_total{job="mevlens-host"}
+        values: 0x80
+      - series: mevlens_rpc_round_trips_total{job="mevlens-host", endpoint="drpc", method="batch", result="ok"}
+        values: 0+4x80
+      - series: mevlens_rpc_round_trips_total{job="mevlens-host", endpoint="drpc", method="batch", result="error"}
+        values: 0+1x80
+    alert_rule_test:
+      - {eval_time: 20m, alertname: MevlensDown, exp_alerts: []}
+      - {eval_time: 20m, alertname: MevlensStalled, exp_alerts: []}
+      - {eval_time: 20m, alertname: MevlensFallingBehind, exp_alerts: []}
+      - {eval_time: 20m, alertname: MevlensFlushFailing, exp_alerts: []}
+      - {eval_time: 20m, alertname: MevlensIncompleteBlocks, exp_alerts: []}
+      - {eval_time: 20m, alertname: MevlensRPCErrors, exp_alerts: []}

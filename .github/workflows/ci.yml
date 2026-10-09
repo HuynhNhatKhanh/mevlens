@@ -23,6 +23,13 @@ jobs:
       - name: Benchmarks compile and run once
         run: go test -run '^$' -bench . -benchtime 1x ./internal/...
 
+  monitoring:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Prometheus and Alertmanager config, alert rule unit tests
+        run: make monitoring-check
+
   integration:
     runs-on: ubuntu-latest
     services:
