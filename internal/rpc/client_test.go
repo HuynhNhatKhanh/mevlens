@@ -491,6 +491,10 @@ func TestErrorClassification(t *testing.T) {
 	if !IsRetryable(&Error{Code: -32000, Message: "header not found"}) {
 		t.Error("a block the backend does not have yet is retryable")
 	}
+	drpcPruned := &Error{Code: 27, Message: "Unknown state. First available state is 1"}
+	if !IsMissingState(drpcPruned) || IsUnsupported(drpcPruned) || IsRetryable(drpcPruned) {
+		t.Error("dRPC's pruned-state answer must be a missing-state refusal")
+	}
 	if !IsMissingState(pruned) || IsMissingState(revertNotSupported) {
 		t.Error("IsMissingState misclassifies")
 	}

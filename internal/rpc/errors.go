@@ -209,7 +209,8 @@ func IsMissingState(err error) bool {
 	if !errors.As(err, &re) {
 		return false
 	}
-	return containsAny(strings.ToLower(re.Message), "historical state", "missing trie node", "state not available", "state is not available")
+	// dRPC words it "Unknown state. First available state is N" (code 27).
+	return containsAny(strings.ToLower(re.Message), "historical state", "missing trie node", "state not available", "state is not available", "unknown state")
 }
 
 func containsAny(s string, subs ...string) bool {
