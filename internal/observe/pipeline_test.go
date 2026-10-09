@@ -68,10 +68,12 @@ func (c *fakeChain) setFork(from uint64, id byte) {
 }
 
 type memSink struct {
-	mu      sync.Mutex
-	batches []Batch
-	rewinds []uint64
-	fail    error
+	mu       sync.Mutex
+	batches  []Batch
+	rewinds  []uint64
+	fail     error // returned by Write...
+	failures int   // ...for this many attempts, or on every attempt if 0
+	attempts int
 }
 
 func (s *memSink) Rewind(_ context.Context, _ string, from uint64) error {
@@ -84,7 +86,8 @@ func (s *memSink) Rewind(_ context.Context, _ string, from uint64) error {
 func (s *memSink) Write(_ context.Context, b *Batch) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.fail != nil {
+	s.attempts++
+	if s.fail != nil && (s.failures == 0 || s.attempts <= s.failures) {
 		return s.fail
 	}
 	s.batches = append(s.batches, *b)
@@ -248,13 +251,62 @@ func TestFollowFlushesOnShutdown(t *testing.T) {
 	})
 }
 
-func TestSinkFailureStopsPipeline(t *testing.T) {
+func TestSinkFailureIsRetried(t *testing.T) {
+	// Regression: one failed write stopped the pipeline, so a ClickHouse restart
+	// ended ingestion for good.
 	synctest.Test(t, func(t *testing.T) {
 		chain := &fakeChain{head: 50, fork: map[uint64]byte{}}
-		boom := errors.New("clickhouse down")
-		err := newPipeline(t, Config{FlushBlocks: 10}, chain, &memSink{fail: boom}).Backfill(t.Context(), 1, 50, nil)
-		if !errors.Is(err, boom) {
-			t.Fatalf("err = %v", err)
+		sink := &memSink{fail: errors.New("clickhouse restarting"), failures: 3}
+		if err := newPipeline(t, Config{FlushBlocks: 10}, chain, sink).Backfill(t.Context(), 1, 50, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got := sink.blocks(); !slices.Equal(got, seq(1, 50)) {
+			t.Fatalf("blocks = %v, want 1..50", got)
+		}
+		if got := sink.batches[0].Blocks; len(got) != 10 || got[0].Number != 1 {
+			t.Fatalf("retried batch = %d blocks from %d, want blocks 1..10 intact", len(got), got[0].Number)
+		}
+		if cp := sink.lastCheckpoint(); cp.Block != 50 || cp.Hash != hashOf(0, 50) {
+			t.Fatalf("checkpoint = %+v", cp)
+		}
+	})
+}
+
+func TestSinkDownStopsOnlyOnCancel(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		chain := &fakeChain{head: 50, fork: map[uint64]byte{}}
+		sink := &memSink{fail: errors.New("clickhouse down")}
+		p := newPipeline(t, Config{FlushBlocks: 10}, chain, sink)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() { done <- p.Backfill(ctx, 1, 50, nil) }()
+		time.Sleep(time.Hour)
+		synctest.Wait()
+		select {
+		case err := <-done:
+			t.Fatalf("pipeline stopped while the sink was down: %v", err)
+		default:
+		}
+		sink.mu.Lock()
+		attempts := sink.attempts
+		sink.mu.Unlock()
+		if attempts < 100 {
+			t.Fatalf("write attempts in an hour = %d, want retries every few seconds", attempts)
+		}
+
+		// Shutdown still tries a final flush, bounded by its timeout.
+		start := time.Now()
+		cancel()
+		err := <-done
+		if err == nil {
+			t.Fatal("Backfill succeeded with the sink down")
+		}
+		if d := time.Since(start); d > 30*time.Second {
+			t.Fatalf("shutdown took %v, want the final flush bounded by 30s", d)
+		}
+		if got := sink.blocks(); len(got) != 0 {
+			t.Fatalf("blocks written = %v", got)
 		}
 	})
 }
