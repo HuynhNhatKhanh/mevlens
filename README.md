@@ -112,12 +112,19 @@ FROM mevlens.blocks FINAL WHERE timeboosted_txs > 0;
 
 ## Operations
 
-The admin server (default `127.0.0.1:9464`; keep it private) serves:
+The admin server (default `127.0.0.1:9464`; keep it private, it has no
+authentication) serves:
 
 - `/metrics`: head lag, block age, fetch/flush latency, RPC round trips per endpoint, arbitrages by status and regime
 - `/healthz`, `/readyz` (readiness pings ClickHouse)
 - `/debug/pprof/*`, including Go 1.27's `goroutineleak` profile
 - `/debug/flightrecorder`: the last seconds of execution trace. A slow fetch or flush also dumps one to disk automatically (`runtime/trace.FlightRecorder`)
+
+`make follow` binds it to the docker0 bridge address (`172.17.0.1:9464` by
+default), which is what `host.docker.internal` resolves to inside compose, so
+VictoriaMetrics scrapes the host process without the server listening on the
+LAN. Without a docker0 interface (Docker Desktop) it falls back to
+`127.0.0.1:9464`. Override with `make follow LISTEN=ADDR`; avoid `0.0.0.0`.
 
 ## Testing
 
