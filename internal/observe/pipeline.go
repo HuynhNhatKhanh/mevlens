@@ -150,6 +150,9 @@ type Pipeline struct {
 	sink Sink
 	m    Metrics
 	log  *slog.Logger
+	// carry holds the pools of a batch dropped on reorg, for the next run's
+	// first batch. Only process touches it, and runs never overlap.
+	carry []dex.Pool
 }
 
 // New builds a Pipeline. m and log may be nil.
@@ -361,6 +364,7 @@ func (p *Pipeline) process(ctx context.Context, blocks <-chan *eth.Block, parent
 	if haveParent {
 		lastHash = *parent
 	}
+	batch.Pools, p.carry = p.carry, nil
 	// flush retries until the batch is written or ctx is done: a ClickHouse
 	// restart or a transient TOO_MANY_PARTS must not stop ingestion for good.
 	// The batch is kept intact between attempts and Write is idempotent, so
@@ -424,11 +428,17 @@ func (p *Pipeline) process(ctx context.Context, blocks <-chan *eth.Block, parent
 			}
 			n := uint64(b.Header.Number)
 			if haveParent && b.Header.ParentHash != lastHash {
-				// The unflushed tail may belong to the abandoned fork: drop it.
+				// The unflushed tail may belong to the abandoned fork: drop it,
+				// but keep its pools. The registry keeps them cached across the
+				// rewind and never drains them again, so dropping them would
+				// leave them unpersisted until a restart.
+				p.carry = batch.Pools
 				return &ReorgError{Block: n, Expected: lastHash, Got: b.Header.ParentHash}
 			}
-			if err := p.resolve(ctx, n, b); err != nil {
-				return err
+			if p.resolve(ctx, n, b) != nil { // ctx is done
+				// Shutting down mid-resolution: the blocks before n are complete
+				// and their pools already drained, so persist them like any stop.
+				return stop()
 			}
 			res := p.cl.Classify(b)
 			batch.add(&res, p.reg.DrainNew())
@@ -446,7 +456,7 @@ func (p *Pipeline) process(ctx context.Context, blocks <-chan *eth.Block, parent
 // resolve resolves the block's pool candidates, retrying transient failures. When
 // the attempts run out, the block is processed anyway: unresolved pools are not
 // cached, so their swaps are skipped here and resolution is tried again the next
-// time they appear.
+// time they appear. It fails only once ctx is done.
 func (p *Pipeline) resolve(ctx context.Context, n uint64, b *eth.Block) error {
 	cands := p.cl.Candidates(b)
 	for attempt := 0; ; attempt++ {

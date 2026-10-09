@@ -106,6 +106,18 @@ func (s *memSink) blocks() []uint64 {
 	return out
 }
 
+func (s *memSink) pools() map[dex.PoolID]bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[dex.PoolID]bool{}
+	for _, b := range s.batches {
+		for _, p := range b.Pools {
+			out[p.ID] = true
+		}
+	}
+	return out
+}
+
 func (s *memSink) lastCheckpoint() Checkpoint {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -126,6 +138,21 @@ func newPipeline(t *testing.T, cfg Config, src BlockSource, sink Sink) *Pipeline
 		t.Fatal(err)
 	}
 	return New(cfg, src, reg, classify.New(reg, o), sink, nil, nil)
+}
+
+// newClassifier returns a classifier over an empty registry, for pipelines
+// driven by a fake Resolver.
+func newClassifier(t *testing.T) *classify.Classifier {
+	t.Helper()
+	reg, err := registry.New(nil, nil, eth.Address{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := pricing.New(pricing.Config{WETH: eth.MustAddress("0x82af49447d8a07e3bd95bd0d56f35241523fbab1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return classify.New(reg, o)
 }
 
 func seq(from, to uint64) []uint64 {
@@ -336,17 +363,9 @@ func TestResolveFailureDoesNotHaltPipeline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		chain := &fakeChain{head: 3, fork: map[uint64]byte{}}
 		sink := &memSink{}
-		reg, err := registry.New(nil, nil, eth.Address{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		o, err := pricing.New(pricing.Config{WETH: eth.MustAddress("0x82af49447d8a07e3bd95bd0d56f35241523fbab1")})
-		if err != nil {
-			t.Fatal(err)
-		}
 		res := &failingResolver{}
 		m := &skipMetrics{}
-		p := New(Config{ResolveAttempts: 4}, chain, res, classify.New(reg, o), sink, m, nil)
+		p := New(Config{ResolveAttempts: 4}, chain, res, newClassifier(t), sink, m, nil)
 
 		if err := p.Backfill(t.Context(), 1, 3, nil); err != nil {
 			t.Fatal(err)
@@ -360,5 +379,124 @@ func TestResolveFailureDoesNotHaltPipeline(t *testing.T) {
 		if !slices.Equal(m.skipped, seq(1, 3)) {
 			t.Fatalf("skipped blocks reported = %v, want 1..3: incomplete blocks must be visible", m.skipped)
 		}
+	})
+}
+
+// poolResolver discovers one pool per block number and reports it once, as the
+// registry's cache does. From block stallAt on (when set) it hangs until ctx is
+// done, or fails if fail is set, so the pipeline backs off.
+type poolResolver struct {
+	stallAt uint64
+	fail    bool
+	seen    map[uint64]bool
+	fresh   []dex.Pool
+}
+
+func poolOf(n uint64) dex.Pool { return dex.Pool{ID: dex.PoolID(eth.Uint64Word(n))} }
+
+func (r *poolResolver) Resolve(ctx context.Context, n uint64, _ eth.Hash, _ []dex.Candidate) error {
+	if r.stallAt != 0 && n >= r.stallAt {
+		if r.fail {
+			return errors.New("registry: resolve pools: endpoint down")
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if !r.seen[n] {
+		r.seen[n] = true
+		r.fresh = append(r.fresh, poolOf(n))
+	}
+	return nil
+}
+
+func (r *poolResolver) DrainNew() []dex.Pool {
+	out := r.fresh
+	r.fresh = nil
+	return out
+}
+
+func assertPools(t *testing.T, sink *memSink, from, to uint64) {
+	t.Helper()
+	pools := sink.pools()
+	for n := from; n <= to; n++ {
+		if !pools[poolOf(n).ID] {
+			t.Fatalf("pool of block %d never written", n)
+		}
+	}
+}
+
+func TestShutdownDuringResolveFlushes(t *testing.T) {
+	// Regression: a cancellation during resolve returned without the final
+	// flush, dropping the processed blocks and the pools drained into them.
+	for _, tc := range []struct {
+		name string
+		fail bool
+	}{{"resolver blocked", false}, {"resolver backing off", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				chain := &fakeChain{head: 10, fork: map[uint64]byte{}}
+				sink := &memSink{}
+				res := &poolResolver{stallAt: 6, fail: tc.fail, seen: map[uint64]bool{}}
+				cfg := Config{FlushBlocks: 1000, FlushInterval: time.Hour, ResolveAttempts: 1000}
+				p := New(cfg, chain, res, newClassifier(t), sink, nil, nil)
+
+				ctx, cancel := context.WithCancel(t.Context())
+				done := make(chan error, 1)
+				go func() { done <- p.Follow(ctx, 1, nil) }()
+				time.Sleep(time.Minute) // stuck resolving block 6
+				cancel()
+				if err := <-done; !errors.Is(err, context.Canceled) {
+					t.Fatalf("Follow returned %v", err)
+				}
+				if got := sink.blocks(); !slices.Equal(got, seq(1, 5)) {
+					t.Fatalf("blocks = %v, want 1..5 flushed on shutdown", got)
+				}
+				if cp := sink.lastCheckpoint(); cp.Block != 5 || cp.Hash != hashOf(0, 5) {
+					t.Fatalf("checkpoint = %+v, want block 5", cp)
+				}
+				assertPools(t, sink, 1, 5)
+			})
+		})
+	}
+}
+
+func TestReorgKeepsDrainedPools(t *testing.T) {
+	// Regression: the batch dropped on a reorg took the pools drained into it.
+	// The registry keeps them cached, so they were never drained again and
+	// stayed unpersisted until a restart.
+	synctest.Test(t, func(t *testing.T) {
+		chain := &fakeChain{head: 95, fork: map[uint64]byte{}}
+		sink := &memSink{}
+		res := &poolResolver{seen: map[uint64]bool{}}
+		cfg := Config{FlushBlocks: 10, FlushInterval: time.Hour, ReorgDepth: 5}
+		p := New(cfg, chain, res, newClassifier(t), sink, nil, nil)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() { done <- p.Follow(ctx, 1, nil) }()
+
+		// Blocks 1..90 are flushed, 91..95 and their pools are pending. Replace
+		// 94..95 with a fork and extend it: the reorg at 96 drops the batch.
+		synctest.Wait()
+		chain.setFork(94, 1)
+		chain.mu.Lock()
+		chain.head = 100
+		for n := uint64(96); n <= 100; n++ {
+			chain.fork[n] = 1
+		}
+		chain.mu.Unlock()
+
+		time.Sleep(10 * time.Second)
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("Follow returned %v", err)
+		}
+		if len(sink.rewinds) != 1 || sink.rewinds[0] != 96-5 {
+			t.Fatalf("rewinds = %v, want [91] (reorg at 96, depth 5)", sink.rewinds)
+		}
+		if cp := sink.lastCheckpoint(); cp.Block != 100 || cp.Hash != hashOf(1, 100) {
+			t.Fatalf("checkpoint = %+v, want block 100 on fork 1", cp)
+		}
+		assertPools(t, sink, 1, 100)
 	})
 }
