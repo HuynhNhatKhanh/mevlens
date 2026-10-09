@@ -1,0 +1,42 @@
+<!--
+  Read-only ClickHouse user for Grafana's datasource, so a Grafana editor cannot
+  DROP or DELETE through Explore. The observer keeps its own read-write user
+  (CLICKHOUSE_USER, created by the image's entrypoint).
+
+  Mounted into /etc/clickhouse-server/users.d/, which ClickHouse reads on every
+  start: the user also appears on an existing data volume (an init script in
+  /docker-entrypoint-initdb.d would only run on an empty one). The password comes
+  from CLICKHOUSE_GRAFANA_PASSWORD, which compose requires to be non-empty.
+-->
+<clickhouse>
+    <profiles>
+        <grafana_readonly>
+            <profile>default</profile>
+            <!-- SELECT only: no writes, DDL, temporary tables or setting changes... -->
+            <readonly>1</readonly>
+            <constraints>
+                <!-- ...except max_execution_time, which the plugin's driver
+                     (clickhouse-go) sets from the query timeout. -->
+                <max_execution_time>
+                    <changeable_in_readonly/>
+                </max_execution_time>
+            </constraints>
+        </grafana_readonly>
+    </profiles>
+
+    <users>
+        <grafana>
+            <password from_env="CLICKHOUSE_GRAFANA_PASSWORD"/>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>grafana_readonly</profile>
+            <quota>default</quota>
+            <!-- The mevlens database only. (grants cannot be combined with
+                 access_management, which is off by default.) -->
+            <grants>
+                <query>GRANT SELECT ON mevlens.*</query>
+            </grants>
+        </grafana>
+    </users>
+</clickhouse>
